@@ -25,14 +25,14 @@ describe('aggregateGlobalGraph', () => {
 
   it('merges multiple per-repo graphs into global', async () => {
     writeRepoGraph('repo-a', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' },
       ],
       edges: [],
     });
     writeRepoGraph('repo-b', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' },
       ],
@@ -50,9 +50,9 @@ describe('aggregateGlobalGraph', () => {
     expect(global.nodes).toHaveLength(2);
   });
 
-  it('detects cross-repo edges via matching titles', async () => {
+  it('does not synthesize cross-repo edges from matching titles', async () => {
     writeRepoGraph('repo-a', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'a/client', title: 'BalanceClient', type: 'component', confidence: 'high' },
       ],
@@ -61,7 +61,7 @@ describe('aggregateGlobalGraph', () => {
       ],
     });
     writeRepoGraph('repo-b', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'b/service', title: 'BalanceService', type: 'component', confidence: 'high' },
       ],
@@ -74,14 +74,14 @@ describe('aggregateGlobalGraph', () => {
     const global = JSON.parse(await fs.readFile(
       path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8',
     ));
-    const crossEdges = global.edges.filter((e: { relation: string }) => e.relation === 'DEPENDS_ON');
-    expect(crossEdges.length).toBeGreaterThan(0);
+    const crossEdges = global.edges.filter((e: { relation: string; source?: string }) => e.relation === 'DEPENDS_ON' && e.source !== 'code-heuristic');
+    expect(crossEdges).toHaveLength(0);
   });
 
   it('does NOT create false cross-repo edges from intra-repo imports (P1 regression)', async () => {
     // repo-a has an internal import: component→module within the same repo
     writeRepoGraph('repo-a', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'a/handler', title: 'RequestHandler', type: 'component', confidence: 'high' },
         { slug: 'a/utils', title: 'RequestUtils', type: 'component', confidence: 'high' },
@@ -92,7 +92,7 @@ describe('aggregateGlobalGraph', () => {
     });
     // repo-b has no shared names with repo-a
     writeRepoGraph('repo-b', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [
         { slug: 'b/worker', title: 'BackgroundWorker', type: 'component', confidence: 'high' },
       ],
@@ -103,11 +103,46 @@ describe('aggregateGlobalGraph', () => {
     const global = JSON.parse(await fs.readFile(
       path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8',
     ));
-    const crossEdges = global.edges.filter((e: { relation: string }) => e.relation === 'DEPENDS_ON');
+    const crossEdges = global.edges.filter((e: { relation: string; source?: string }) => e.relation === 'DEPENDS_ON' && e.source !== 'code-heuristic');
     // repo-a's internal import (RequestHandler→RequestUtils) should NOT produce
     // a cross-repo DEPENDS_ON edge because both nodes belong to the same repo
     // and detectCrossRepoEdges runs BEFORE merge (overlay doesn't match itself in existing)
     expect(crossEdges).toHaveLength(0);
+  });
+
+  it('preserves identical relative paths from different repositories as distinct code nodes', async () => {
+    const repoA = createGraphIndex([{ slug: 'code://repo-a/src/app.ts', path: 'src/app.ts', title: 'app.ts', type: 'component', confidence: 'EXTRACTED', origin: 'repo-a' }]);
+    const repoB = createGraphIndex([{ slug: 'code://repo-b/src/app.ts', path: 'src/app.ts', title: 'app.ts', type: 'component', confidence: 'EXTRACTED', origin: 'repo-b' }]);
+    writeRepoGraph('repo-a', repoA);
+    writeRepoGraph('repo-b', repoB);
+
+    await aggregateGlobalGraph(tmpDir);
+    const graph = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
+    expect(graph.nodes.map((node: { slug: string }) => node.slug).sort()).toEqual([
+      'code://repo-a/src/app.ts',
+      'code://repo-b/src/app.ts',
+    ]);
+  });
+
+  it('writes CALLS_HTTP only for a unique service-resolved cross-repo contract', async () => {
+    const web = createGraphIndex([{ slug: 'code://web/src/api.ts', path: 'src/api.ts', title: 'api.ts', type: 'component', confidence: 'EXTRACTED', origin: 'web' }]);
+    web.httpContracts = {
+      requests: [{ origin: 'web', file: 'src/api.ts', line: 3, method: 'POST', path: '/orders', service: 'orders' }],
+      endpoints: [],
+    };
+    const api = createGraphIndex([{ slug: 'code://orders/src/OrdersController.java', path: 'src/OrdersController.java', title: 'OrdersController.java', type: 'component', confidence: 'EXTRACTED', origin: 'orders' }]);
+    api.httpContracts = {
+      requests: [],
+      endpoints: [{ origin: 'orders', file: 'src/OrdersController.java', line: 8, methods: ['POST'], path: '/orders', service: 'orders' }],
+    };
+    writeRepoGraph('web', web);
+    writeRepoGraph('orders', api);
+
+    await aggregateGlobalGraph(tmpDir);
+    const graph = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
+    expect(graph.edges).toContainEqual(expect.objectContaining({
+      from: 'code://web/src/api.ts', to: 'code://orders/src/OrdersController.java', relation: 'CALLS_HTTP', source: 'code-http',
+    }));
   });
 
   it('returns null when no evidence directory exists', async () => {
@@ -180,12 +215,12 @@ describe('aggregateGlobalGraph', () => {
   describe('scopeGlobalGraph (#912 review round 2)', () => {
     it("subtracts a withheld project's nodes and its dangling edges from the real global graph", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [{ from: 'b/svc', to: 'b/other', relation: 'DEPENDS_ON' }],
       });
@@ -198,12 +233,12 @@ describe('aggregateGlobalGraph', () => {
 
     it('removes a cross-repo edge into a withheld node as a dangling edge, even though the edge only ever lived in the merged file', async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/client', title: 'BalanceClient', type: 'component', confidence: 'high' }],
         edges: [{ from: 'a/client', to: 'libs/balance_service.py', relation: 'imports' }],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/service', title: 'BalanceService', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -220,12 +255,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("keeps content that lives only in the global file (e.g. --reconcile's MAPS_TO edges) when the withheld project is unrelated to it", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -248,7 +283,7 @@ describe('aggregateGlobalGraph', () => {
 
     it("fails closed (returns null) when a withheld codebase's per-repo graph file is missing — e.g. extracted by the since-removed `teamai codebase --extract`, which never wrote one (#912 review round 5 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -263,12 +298,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("removes a withheld codebase's tagged content by origin even after its per-repo file goes structurally wrong post-aggregation, instead of failing the whole query closed (#912 review round 10 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -288,7 +323,7 @@ describe('aggregateGlobalGraph', () => {
 
     it("fails closed when a withheld codebase's per-repo graph file has nodes[]/edges[] arrays but a node that doesn't validate against the graph schema, and it was never successfully aggregated before (#912 review round 8 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -299,7 +334,7 @@ describe('aggregateGlobalGraph', () => {
       // never been successfully aggregated, so it carries no origin tag
       // either — there is nothing to fall back on.
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ bogus: true }],
         edges: [],
       });
@@ -311,12 +346,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("removes a withheld codebase's tagged content by origin even after its per-repo file goes stale (schema-valid but empty) post-aggregation, instead of failing the whole query closed (#912 review round 9 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -327,7 +362,7 @@ describe('aggregateGlobalGraph', () => {
       // already stamped on svc-b's node makes this file irrelevant to
       // scoping now — it is only read at all for a codebase tagging never
       // covered in the first place.
-      writeRepoGraph('svc-b', { schemaVersion: 1, generatedAt: '2026-01-02', nodes: [], edges: [] });
+      writeRepoGraph('svc-b', { schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-02', nodes: [], edges: [] });
 
       const graph = await scopeGlobalGraph(tmpDir, new Set(['svc-b']));
       expect(graph?.nodes.map((n: { slug: string }) => n.slug)).toEqual(['a/svc']);
@@ -343,12 +378,12 @@ describe('aggregateGlobalGraph', () => {
       // something else entirely) per-repo file would contribute the WRONG
       // identifiers for subtracting what the global graph actually has.
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/old-svc', title: 'ServiceB Old', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -358,7 +393,7 @@ describe('aggregateGlobalGraph', () => {
       // entirely different (but still valid, non-empty) node — the global
       // graph has not been re-aggregated to match yet.
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-02',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-02',
         nodes: [{ slug: 'b/new-svc', title: 'ServiceB New', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -371,7 +406,7 @@ describe('aggregateGlobalGraph', () => {
 
     it("restores the allowed repo's title even when its own per-repo file used the legacy `label` field instead of `title` (#912 review round 8 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         // Legacy node shape: id/label/kind instead of slug/title/type.
         // GraphNodeSchema's preprocess step normalizes this to slug/title/
         // type on load — restoring from the RAW per-repo object instead of
@@ -381,7 +416,7 @@ describe('aggregateGlobalGraph', () => {
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'AppB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -402,12 +437,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("does not fail closed when EVERY withheld codebase's per-repo graph file is readable, even if other (allowed) codebases have none", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -422,12 +457,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("restores an allowed repo's own title/domain for a colliding slug, even when the withheld repo's version won the merge (#912 review round 6 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'AppA', domain: 'svc-a', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'AppB', domain: 'svc-b', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -451,7 +486,7 @@ describe('aggregateGlobalGraph', () => {
 
     it('subtracts a withheld-only edge by its exact relation, keeping an allowed edge between the same two colliding endpoints under a different relation (#912 review round 6 P2)', async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppA', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigA', type: 'config', confidence: 'high' },
@@ -459,7 +494,7 @@ describe('aggregateGlobalGraph', () => {
         edges: [{ from: 'component/App', to: 'component/Config', relation: 'REFERENCES' }],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppB', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigB', type: 'config', confidence: 'high' },
@@ -477,7 +512,7 @@ describe('aggregateGlobalGraph', () => {
 
     it("subtracts a withheld-only edge even when its per-repo file uses the legacy `imports` relation name loadGraphIndex normalizes to DEPENDS_ON (#912 review round 7 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppA', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigA', type: 'config', confidence: 'high' },
@@ -485,7 +520,7 @@ describe('aggregateGlobalGraph', () => {
         edges: [{ from: 'component/App', to: 'component/Config', relation: 'REFERENCES' }],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppB', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigB', type: 'config', confidence: 'high' },
@@ -510,7 +545,7 @@ describe('aggregateGlobalGraph', () => {
       // (unqualified slugs collide across repos), but only svc-b's graph
       // has an edge directly between them.
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppA', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigA', type: 'config', confidence: 'high' },
@@ -518,7 +553,7 @@ describe('aggregateGlobalGraph', () => {
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'component/App', title: 'AppB', type: 'component', confidence: 'high' },
           { slug: 'component/Config', title: 'ConfigB', type: 'config', confidence: 'high' },
@@ -539,12 +574,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("removes a --reconcile-added code-page node and its MAPS_TO edge for a withheld codebase, even though neither ever lived in a per-repo file (#912 review round 4 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -569,12 +604,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("removes a cross-repo edge whose MATCHED (target) node was the withheld repo's, even after a later allowed repo wins the slug collision and the node itself survives (#974 review round 12 P1)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/client', title: 'BalanceClient', type: 'component', confidence: 'high' }],
         edges: [{ from: 'a/client', to: 'libs/balance_service.py', relation: 'imports' }],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/service', title: 'BalanceService', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -584,17 +619,15 @@ describe('aggregateGlobalGraph', () => {
       // allowed, even though the cross-repo edge below was detected because
       // of svc-b's (withheld) component, not svc-c's.
       writeRepoGraph('svc-c', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/service', title: 'UnrelatedService', type: 'component', confidence: 'high' }],
         edges: [],
       });
       await aggregateGlobalGraph(tmpDir);
 
       const global = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
-      const crossEdge = global.edges.find((e: { relation: string }) => e.relation === 'DEPENDS_ON');
-      expect(crossEdge).toBeDefined();
-      // Both sides: svc-a's own node produced the import, svc-b's was matched.
-      expect(crossEdge.crossOriginPairs).toEqual([expect.arrayContaining(['svc-a', 'svc-b'])]);
+      const crossEdge = global.edges.find((e: { relation: string; source?: string }) => e.relation === 'DEPENDS_ON' && e.source !== 'code-heuristic');
+      expect(crossEdge).toBeUndefined();
 
       const graph = await scopeGlobalGraph(tmpDir, new Set(['svc-b']));
       // The slug survives — svc-c (allowed) also claims it.
@@ -616,28 +649,27 @@ describe('aggregateGlobalGraph', () => {
       // origin alone, surviving even though it only exists because of
       // svc-b's own import.
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/client', title: 'BalanceClient', type: 'component', confidence: 'high' }],
         edges: [{ from: 'b/client', to: 'libs/balance_service.py', relation: 'imports' }],
       });
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/service', title: 'BalanceService', type: 'component', confidence: 'high' }],
         edges: [],
       });
       // svc-c mints the identical unqualified slug svc-b's IMPORTER node
       // used, and is processed last, so its write wins that collision.
       writeRepoGraph('svc-c', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/client', title: 'UnrelatedClient', type: 'component', confidence: 'high' }],
         edges: [],
       });
       await aggregateGlobalGraph(tmpDir);
 
       const global = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
-      const crossEdge = global.edges.find((e: { relation: string }) => e.relation === 'DEPENDS_ON');
-      expect(crossEdge).toBeDefined();
-      expect(crossEdge.crossOriginPairs).toEqual([expect.arrayContaining(['svc-a', 'svc-b'])]);
+      const crossEdge = global.edges.find((e: { relation: string; source?: string }) => e.relation === 'DEPENDS_ON' && e.source !== 'code-heuristic');
+      expect(crossEdge).toBeUndefined();
 
       const graph = await scopeGlobalGraph(tmpDir, new Set(['svc-b']));
       // The slug survives — svc-c (allowed) also claims it — and svc-a's
@@ -661,7 +693,7 @@ describe('aggregateGlobalGraph', () => {
       const globalDir = path.join(tmpDir, '.indices');
       fs.ensureDirSync(globalDir);
       fs.writeFileSync(path.join(globalDir, 'graph-index.json'), JSON.stringify({
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [
           { slug: 'old/client', title: 'NewClient', type: 'component', confidence: 'high' },
           { slug: 'allowed/target', title: 'AllowedTarget', type: 'component', confidence: 'high' },
@@ -669,12 +701,12 @@ describe('aggregateGlobalGraph', () => {
         edges: [{ from: 'old/client', to: 'allowed/target', relation: 'DEPENDS_ON' }],
       }));
       writeRepoGraph('svc-old', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'old/client', title: 'OldClient', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-new', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'old/client', title: 'NewClient', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -687,17 +719,17 @@ describe('aggregateGlobalGraph', () => {
       const globalDir = path.join(tmpDir, '.indices');
       fs.ensureDirSync(globalDir);
       fs.writeFileSync(path.join(globalDir, 'graph-index.json'), JSON.stringify({
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'NewApp', type: 'component', confidence: 'high' }],
         edges: [{ from: 'iwiki/p/1', to: 'component/App', relation: 'MAPS_TO', term: 'App', confidence: 0.8 }],
       }));
       writeRepoGraph('svc-old', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'OldApp', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-new', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'NewApp', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -710,7 +742,7 @@ describe('aggregateGlobalGraph', () => {
       const globalDir = path.join(tmpDir, '.indices');
       fs.ensureDirSync(globalDir);
       fs.writeFileSync(path.join(globalDir, 'graph-index.json'), JSON.stringify({
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [],
         edges: [{ from: 'x', to: 'y', relation: 'DEPENDS_ON', origin: 'svc-a', crossOriginPairs: [['svc-w', 'svc-z']] }],
       }));
@@ -727,7 +759,7 @@ describe('aggregateGlobalGraph', () => {
       const globalDir = path.join(tmpDir, '.indices');
       fs.ensureDirSync(globalDir);
       fs.writeFileSync(path.join(globalDir, 'graph-index.json'), JSON.stringify({
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [],
         edges: [{ from: 'x', to: 'y', relation: 'DEPENDS_ON', origin: 'svc-a', crossOriginPairs: [['svc-w', 'svc-z']] }],
       }));
@@ -739,14 +771,14 @@ describe('aggregateGlobalGraph', () => {
     it("keeps an allowed repo's own ordinary edge claim alive through the REAL aggregation pipeline, when a later-detected cross-repo edge happens to share its exact identity and wins the merge tie-break (#974 review round 18 P2)", async () => {
       // svc-a declares a plain fact-level edge directly (not import-derived).
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [],
         edges: [{ from: 'a/x', to: 'a/y', relation: 'DEPENDS_ON' }],
       });
       // svc-w (withheld) imports something matching svc-z's component — not
       // detected yet, since svc-z doesn't exist when svc-w is processed.
       writeRepoGraph('svc-w', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/x', title: 'X', type: 'component', confidence: 'high' }],
         edges: [{ from: 'a/x', to: 'y.py', relation: 'imports' }],
       });
@@ -754,7 +786,7 @@ describe('aggregateGlobalGraph', () => {
       // resulting synthesized edge has the IDENTICAL from/to/relation as
       // svc-a's own plain edge above, purely by slug coincidence.
       writeRepoGraph('svc-z', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/y', title: 'Y', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -763,9 +795,9 @@ describe('aggregateGlobalGraph', () => {
       const global = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
       const edge = global.edges.find((e: { from: string; to: string }) => e.from === 'a/x' && e.to === 'a/y');
       expect(edge).toBeDefined();
-      // svc-a's plain origin must have survived the merge as its own pair,
-      // not been silently dropped because the cross edge won the tie.
-      expect(edge.crossOriginPairs).toEqual(expect.arrayContaining([['svc-a'], expect.arrayContaining(['svc-w', 'svc-z'])]));
+      // No title-derived cross edge is produced, so this remains svc-a's
+      // ordinary edge without synthetic provenance.
+      expect(edge.crossOriginPairs).toBeUndefined();
 
       const graph = await scopeGlobalGraph(tmpDir, new Set(['svc-w']));
       // svc-a's independent claim keeps the edge alive even though svc-w
@@ -775,12 +807,12 @@ describe('aggregateGlobalGraph', () => {
 
     it("keeps a cross-repo edge that remains independently producible by a fully-allowed repo pair, even though withholding one repo removes ITS pair's claim on the identical edge identity (#974 review round 15 P2)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/service', title: 'Service', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'shared/client', title: 'ClientB', type: 'component', confidence: 'high' }],
         edges: [{ from: 'shared/client', to: 'service.py', relation: 'imports' }],
       });
@@ -789,35 +821,31 @@ describe('aggregateGlobalGraph', () => {
       // the two repos' relationships to svc-a merge onto one edge
       // identity but must remain separately attributable.
       writeRepoGraph('svc-c', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'shared/client', title: 'ClientC', type: 'component', confidence: 'high' }],
         edges: [{ from: 'shared/client', to: 'service.py', relation: 'imports' }],
       });
       await aggregateGlobalGraph(tmpDir);
 
       const global = JSON.parse(await fs.readFile(path.join(tmpDir, '.indices', 'graph-index.json'), 'utf8'));
-      const crossEdge = global.edges.find((e: { relation: string }) => e.relation === 'DEPENDS_ON');
-      expect(crossEdge).toBeDefined();
-      // Routed through mergeGraphs (not appended raw), so the two
-      // independent detections land as TWO pairs on ONE edge object.
-      expect(crossEdge.crossOriginPairs).toHaveLength(2);
+      const crossEdge = global.edges.find((e: { relation: string; source?: string }) => e.relation === 'DEPENDS_ON' && e.source !== 'code-heuristic');
+      expect(crossEdge).toBeUndefined();
 
       const graph = await scopeGlobalGraph(tmpDir, new Set(['svc-b']));
       // svc-c (allowed) wins the node collision, as always.
       expect(graph?.nodes.map((n: { slug: string }) => n.slug)).toContain('shared/client');
-      // The edge survives: svc-c+svc-a's pair is fully allowed, even though
-      // svc-b+svc-a's pair — the identical edge identity — is withheld.
-      expect(graph?.edges ?? []).toContainEqual(expect.objectContaining({ from: 'shared/client', to: 'a/service' }));
+      // Name matches are not evidence, so no synthetic cross-repo edge exists.
+      expect(graph?.edges ?? []).not.toContainEqual(expect.objectContaining({ from: 'shared/client', to: 'a/service' }));
     });
 
     it("removes an originless MAPS_TO edge pointing at evidence/code/<withheld>/<page>.md even when no node was ever created for that page (#974 review round 12 P2)", async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -844,12 +872,12 @@ describe('aggregateGlobalGraph', () => {
       // (an earlier version of this filter) deleted these for every allowed
       // repo too, the moment anything was withheld.
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [{ from: 'src/a.ts', to: 'src/b.ts', relation: 'DEPENDS_ON' }],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -864,12 +892,12 @@ describe('aggregateGlobalGraph', () => {
       // `component/App` the same way for any repo), so two unrelated repos
       // can legitimately collide on one slug after merging.
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'AppA', type: 'component', confidence: 'high' }],
         edges: [],
       });
       writeRepoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'component/App', title: 'AppB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -881,7 +909,7 @@ describe('aggregateGlobalGraph', () => {
 
     it('excludes case-foldedly, matching the evidence/code/<slug>/ directory on a case-insensitive filesystem', async () => {
       writeRepoGraph('Svc-B', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/svc', title: 'ServiceB', type: 'component', confidence: 'high' }],
         edges: [],
       });
@@ -893,7 +921,7 @@ describe('aggregateGlobalGraph', () => {
 
     it('returns the graph unchanged when nothing is withheld', async () => {
       writeRepoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/svc', title: 'ServiceA', type: 'component', confidence: 'high' }],
         edges: [],
       });

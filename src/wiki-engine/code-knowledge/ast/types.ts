@@ -72,6 +72,17 @@ export interface AstImplementsSite {
   line: number;
 }
 
+/** A statically resolved Spring MVC endpoint declared by a Java controller. */
+export interface AstHttpEndpoint {
+  file: string;
+  line: number;
+  methods?: string[];
+  paths: string[];
+  controller: string;
+  handler: string;
+  confidence: ManifestConfidence;
+}
+
 export type StructuralRelation = "DEPENDS_ON" | "REFERENCES" | "IMPLEMENTS";
 
 export interface StructuralEdge {
@@ -99,12 +110,15 @@ export interface AstExtractionStats {
   edges: number;
   filesParsed: number;
   filesSkipped: number;
+  filesFailed: number;
+  filesUnsupported: number;
 }
 
 export interface StructuralGraphResult {
   symbols: AstSymbol[];
   imports: AstImport[];
   callSites: AstCallSite[];
+  httpEndpoints: AstHttpEndpoint[];
   edges: StructuralEdge[];
   gaps: AstExtractionGap[];
   stats: AstExtractionStats;

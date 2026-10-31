@@ -349,7 +349,9 @@ async function seedBaseline(wikiRoot: string, stagingWiki: string, slug: string)
   await fs.ensureDir(stagingEvidence);
   await fs.copy(manifest, path.join(stagingWiki, 'source-manifest.json'));
   await fs.copy(manifest, path.join(stagingEvidence, 'source-manifest.json'));
-  for (const cache of INCREMENTAL_CACHES) {
+  // The graph version must travel with the baseline: unchanged v2 sources can
+  // skip, while a v1 graph still requires re-extraction instead of relabeling.
+  for (const cache of [...INCREMENTAL_CACHES, 'graph-index.json']) {
     const src = path.join(indices, cache);
     if (await fs.pathExists(src)) await fs.copy(src, path.join(stagingWiki, '.indices', cache));
   }

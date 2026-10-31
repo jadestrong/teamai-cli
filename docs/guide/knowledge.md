@@ -167,9 +167,11 @@ The extraction reads the MR's review threads along with its description, commits
 
 If an AI-generated MR learning has a non-string `title`, the MR title is used for its summary and queued filename. Only string entries in a `tags` array are displayed. The draft content is not rewritten to repair metadata.
 
-`--incremental` re-extracts only the files changed since the last import; each codebase keeps that baseline in its own `evidence/code/<slug>/`. A remote repo's slug is `<provider>__<owner>__<repo>`, shared by `--from-repo`, `--from-mr` and `teamai ci extract-mr`. `--dir` uses it too when the checkout's `origin` names the repo; otherwise it uses the repo or directory name, and refuses to replace evidence there that another remote repo, another directory of the same repo, or another checkout without an `origin` published. A checkout without an `origin` whose name another such checkout already holds gets `<name>-<hash8>`; the import prints the slug it used as `project:`.
+`--incremental` skips an unchanged source snapshot. When files change, it rebuilds the snapshot so imports, API catalogs and service configuration remain consistent with unchanged callers. Each codebase keeps its baseline in its own `evidence/code/<slug>/`. A remote repo's slug is `<provider>__<owner>__<repo>`, shared by `--from-repo`, `--from-mr` and `teamai ci extract-mr`. `--dir` uses it too when the checkout's `origin` names the repo; otherwise it uses the repo or directory name, and refuses to replace evidence there that another remote repo, another directory of the same repo, or another checkout without an `origin` published. A checkout without an `origin` whose name another such checkout already holds gets `<name>-<hash8>`; the import prints the slug it used as `project:`.
 
 `--max-files` raises the cap on source files collected per repository (default 200). Files are collected key-file first; a source with more files is truncated, and the run warns with both counts instead of dropping the rest silently.
+
+Code graph v2 identifies files as `code://<origin>/<relative-path>`. Java AST extraction reads Spring controller mappings and module application configuration. Frontend requests retain method, path and source evidence. A formal `CALLS_HTTP` edge requires one endpoint with the same method, full path and resolved service. Dynamic hosts, URLs and ambiguous matches remain observations in `httpContracts`, with coverage and reasons. Names and similar file paths do not create cross-repository dependencies. Gateway rewrites need explicit configuration evidence. Re-import source to rebuild a v1 graph.
 
 After an import, check and enrich that same `teamwiki/` with `teamai codebase`:
 
@@ -250,7 +252,7 @@ teamai ci extract-mr --url "$MR_URL" --mode comment --individual-comments
 teamai ci extract-mr --url "$MR_URL" --mode write --team-repo ../team-repo --individual-comments
 ```
 
-Write mode runs in the merged source checkout. Its code knowledge goes through the same path as `teamai import --dir . --incremental`, into `<team-repo>/teamwiki/evidence/code/<provider>__<owner>__<repo>/`, re-extracting only the changed files. Clone the team repo outside the checkout: otherwise its files would be extracted as source, so this step is skipped.
+Write mode runs in the merged source checkout. Its code knowledge goes through the same path as `teamai import --dir . --incremental`, into `<team-repo>/teamwiki/evidence/code/<provider>__<owner>__<repo>/`, rebuilding the snapshot when files change. Clone the team repo outside the checkout: otherwise its files would be extracted as source, so this step is skipped.
 
 Mark a suggestion to drop it: 👎 on GitHub and GitLab, ☝️ on TGit. Templates — GitHub Actions, GitLab CI and 智研/Coding CI — are in [`examples/ci/`](../../examples/ci/README.md).
 

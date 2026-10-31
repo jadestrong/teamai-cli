@@ -4,6 +4,8 @@ import { readdir } from 'node:fs/promises';
 import fs from 'fs-extra';
 import { log } from './utils/logger.js';
 import { caseFoldKey } from './manifest-schema.js';
+import { httpContractCoverage } from './wiki-engine/code-knowledge/http-contract.js';
+import { graphEdgeKey } from './wiki-engine/core/graph-index.schema.js';
 
 /**
  * 聚合 teamwiki/evidence/code/ 下所有仓库的 per-repo graph。
@@ -21,9 +23,8 @@ export async function buildAggregatedGraph(teamwikiRoot: string) {
     const evidenceBase = path.join(teamwikiRoot, 'evidence', 'code');
     if (!(await fs.pathExists(evidenceBase))) return null;
 
-    const { mergeGraphs, createGraphIndex } = await import('./wiki-engine/adapters/index.js');
+    const { mergeGraphs, parseGraphIndex, matchHttpContracts, httpMatchesToGraphEdges } = await import('./wiki-engine/adapters/index.js');
     type GraphIndex = Parameters<typeof mergeGraphs>[0];
-    const { detectCrossRepoEdges } = await import('./import-repo.js');
 
     let globalGraph: GraphIndex | null = null;
     const projectDirs = await readdir(evidenceBase, { withFileTypes: true });
@@ -34,7 +35,13 @@ export async function buildAggregatedGraph(teamwikiRoot: string) {
         if (!(await fs.pathExists(graphPath))) continue;
 
         try {
-            const overlay = JSON.parse(await fs.readFile(graphPath, 'utf8')) as GraphIndex;
+            const rawOverlay = JSON.parse(await fs.readFile(graphPath, 'utf8'));
+            const parsedOverlay = parseGraphIndex(rawOverlay);
+            if (!parsedOverlay) {
+                log.warn(`[graph] skipped ${dir.name} graph: requires ${"team-wiki.graph-index.v2"} rebuild`);
+                continue;
+            }
+            const overlay: GraphIndex = parsedOverlay;
             // Stamp ownership onto the data itself before it ever enters the
             // global graph (#912 review): every node and edge this ONE
             // per-repo file contributed is unambiguously this project's.
@@ -47,31 +54,10 @@ export async function buildAggregatedGraph(teamwikiRoot: string) {
             for (const node of overlay.nodes) node.origin = dir.name;
             for (const edge of overlay.edges) edge.origin = dir.name;
             if (globalGraph) {
-                // A cross-repo edge spans two codebases, so
-                // detectCrossRepoEdges tags it with BOTH their origins as a
-                // pair in `crossOriginPairs` (see its own doc comment) —
-                // captured at the moment of the match rather than re-derived
-                // later from whichever node ends up winning a slug collision.
-                const crossEdges = detectCrossRepoEdges(overlay, globalGraph);
+                // Formal cross-repository edges are produced only by contract
+                // extractors. Never manufacture a dependency from a matching
+                // name or path: that loses provenance and creates false links.
                 globalGraph = mergeGraphs(globalGraph, overlay);
-                if (crossEdges.length > 0) {
-                    // Routed through `mergeGraphs`, not appended raw: a
-                    // THIRD repo processed later can independently detect a
-                    // cross-repo edge with the exact same from/to/relation
-                    // identity as one already pushed here in an earlier
-                    // iteration (e.g. two unrelated repos both importing a
-                    // same-named component from a shared third one under an
-                    // equally generic importer slug of their own). Appending
-                    // both raw would leave two separate array entries
-                    // sharing one key — scopeGlobalGraph's removal is keyed,
-                    // so marking either one withheld removes both, which is
-                    // exactly what crossOriginPairs (see its own doc
-                    // comment) exists to prevent; that only works if both
-                    // detections' pairs actually end up unioned onto ONE
-                    // edge object, which only `mergeGraphs` does (#974
-                    // review round 15 P2).
-                    globalGraph = mergeGraphs(globalGraph, createGraphIndex([], crossEdges));
-                }
             } else {
                 globalGraph = overlay;
             }
@@ -80,6 +66,28 @@ export async function buildAggregatedGraph(teamwikiRoot: string) {
         }
     }
 
+    if (!globalGraph) return null;
+
+    // HTTP contracts are deliberately matched only after every repository is
+    // present. No title, file name, or component similarity can create an edge.
+    const contracts = globalGraph.httpContracts;
+    if (contracts) {
+        const matches = matchHttpContracts(contracts.requests, contracts.endpoints);
+        const counts = Object.values(contracts.coverageByOrigin ?? {});
+        contracts.matches = matches;
+        contracts.coverage = httpContractCoverage(
+            counts.reduce((sum, count) => sum + count.filesScanned, 0),
+            counts.reduce((sum, count) => sum + count.filesParsed, 0),
+            contracts.requests, contracts.endpoints, matches,
+            counts.reduce((sum, count) => sum + count.filesFailed, 0),
+            counts.reduce((sum, count) => sum + (count.filesUnsupported ?? 0), 0),
+        );
+        // Recompute every HTTP edge against the complete endpoint set. A
+        // previously unique local match may become ambiguous after importing
+        // another service, so persisted local HTTP edges cannot survive here.
+        const base = { ...globalGraph, edges: globalGraph.edges.filter((edge) => edge.relation !== 'CALLS_HTTP') };
+        return mergeGraphs(base, { ...base, edges: httpMatchesToGraphEdges(matches) });
+    }
     return globalGraph;
 }
 
@@ -201,7 +209,7 @@ export async function scopeGlobalGraph(
     // it. `JSON.stringify` (not `|`-concatenation) avoids aliasing `a|b -> c`
     // with `a -> b|c` were an identifier ever to contain the separator —
     // matching `graphEdgeKey`'s own approach in graph-index.schema.ts.
-    const edgeKey = (from: string, to: string, relation?: string) => JSON.stringify([from, to, relation ?? '']);
+    const edgeKey = graphEdgeKey;
     const allowedNodeBySlug = new Map<string, GraphNode>();
 
     // Origin-tag removal first (see doc comment): authoritative and
@@ -237,7 +245,7 @@ export async function scopeGlobalGraph(
         }
         const edgeWithheld = pairs.length > 0 && pairs.every((pair) =>
             pair.some((rawOrigin) => withheldProjects.has(caseFoldKey(rawOrigin))));
-        if (edgeWithheld) withheldEdgeKeys.add(edgeKey(edge.from, edge.to, edge.relation));
+        if (edgeWithheld) withheldEdgeKeys.add(edgeKey(edge));
     }
     const tagCovered = new Set([...withheldProjects].filter((p) => taggedOrigins.has(p)));
 
@@ -303,7 +311,7 @@ export async function scopeGlobalGraph(
                     fallbackWithheldIds.add(edge.from);
                     fallbackWithheldIds.add(edge.to);
                 }
-                edgeKeys.add(edgeKey(edge.from, edge.to, edge.relation));
+                edgeKeys.add(edgeKey(edge));
             }
             if (isWithheld) accountedWithheld.add(foldedName);
         } catch { /* handled below: an unreadable or schema-invalid file leaves this withheld project unaccounted for */ }
@@ -377,8 +385,6 @@ export async function scopeGlobalGraph(
         }
     }
 
-    if (withheldIds.size === 0 && withheldEdgeKeys.size === 0 && contestedSlugs.size === 0) return globalGraph;
-
     // `mergeGraphs` lets the later-processed repo's node win outright on a
     // colliding slug (no field-level merge) — so a slug kept here because an
     // ALLOWED repo also claims it can still carry a WITHHELD repo's title or
@@ -386,13 +392,36 @@ export async function scopeGlobalGraph(
     // one. Re-attaching the allowed repo's own copy of that node (read in the
     // same scan above) makes the surviving node's metadata actually
     // attributable to an allowed source, not whichever repo's write won.
+    const scopedOriginWithheld = (slug: string) => {
+        const origin = /^code:\/\/([^/]+)\//u.exec(slug)?.[1];
+        return origin !== undefined && withheldProjects.has(caseFoldKey(origin));
+    };
     const nodes = globalGraph.nodes
-        .filter((n) => !withheldIds.has(n.slug))
+        .filter((n) => !withheldIds.has(n.slug) && !scopedOriginWithheld(n.slug))
         .map((n) => (contestedSlugs.has(n.slug) ? { ...n, ...allowedNodeBySlug.get(n.slug) } : n));
     const edges = globalGraph.edges.filter((e) =>
-        !withheldIds.has(e.from) && !withheldIds.has(e.to) && !withheldEdgeKeys.has(edgeKey(e.from, e.to, e.relation)));
-
-    return { ...globalGraph, nodes, edges } satisfies GraphIndex;
+        !withheldIds.has(e.from) && !withheldIds.has(e.to) && !scopedOriginWithheld(e.from) && !scopedOriginWithheld(e.to) && !withheldEdgeKeys.has(edgeKey(e)));
+    const contracts = globalGraph.httpContracts;
+    let httpContracts = contracts;
+    if (contracts) {
+        const allowed = (record: { origin: string }) => !withheldProjects.has(caseFoldKey(record.origin));
+        const requests = contracts.requests.filter(allowed);
+        const endpoints = contracts.endpoints.filter(allowed);
+        // Scoping must not turn an ambiguous match into a formal dependency
+        // merely because a competing endpoint is now hidden.
+        const matches = contracts.matches?.filter((match) => allowed(match.request)).map((match) =>
+            match.endpoint && !allowed(match.endpoint)
+                ? { request: match.request, confidence: 'AMBIGUOUS' as const, reason: 'Endpoint outside query scope' } : match);
+        const coverageByOrigin = Object.fromEntries(Object.entries(contracts.coverageByOrigin ?? {}).filter(([origin]) => allowed({ origin })));
+        const counts = Object.values(coverageByOrigin);
+        httpContracts = { requests, endpoints, matches, coverageByOrigin, coverage: httpContractCoverage(
+            counts.reduce((sum, count) => sum + count.filesScanned, 0),
+            counts.reduce((sum, count) => sum + count.filesParsed, 0), requests, endpoints, matches ?? [],
+            counts.reduce((sum, count) => sum + count.filesFailed, 0),
+            counts.reduce((sum, count) => sum + (count.filesUnsupported ?? 0), 0),
+        ) };
+    }
+    return { ...globalGraph, nodes, edges, httpContracts } satisfies GraphIndex;
 }
 
 /**

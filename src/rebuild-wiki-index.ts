@@ -4,6 +4,7 @@ import { pathExists } from './utils/fs.js';
 import { log } from './utils/logger.js';
 import { HOT_TEMPLATE } from './wiki-engine/adapters/templates.js';
 import type { CodebaseOutputManifestV2 } from './wiki-engine/manifest-schema.js';
+import { loadGraphIndex } from './wiki-engine/core/graph-index.schema.js';
 
 interface ProjectInfo {
   slug: string;
@@ -118,10 +119,9 @@ export async function rebuildWikiIndex(teamwikiRoot: string): Promise<void> {
   const graphPath = path.join(teamwikiRoot, '.indices', 'graph-index.json');
   if (await pathExists(graphPath)) {
     try {
-      const raw = await readFile(graphPath, 'utf-8');
-      const graph = JSON.parse(raw);
-      totalNodes = Array.isArray(graph.nodes) ? graph.nodes.length : 0;
-      totalEdges = Array.isArray(graph.edges) ? graph.edges.length : 0;
+      const graph = await loadGraphIndex(teamwikiRoot);
+      totalNodes = graph?.nodes.length ?? 0;
+      totalEdges = graph?.edges.length ?? 0;
     } catch { /* skip */ }
   }
 
@@ -154,7 +154,7 @@ export async function rebuildWikiIndex(teamwikiRoot: string): Promise<void> {
   routerLines.push('## 路由规则');
   routerLines.push('');
   routerLines.push('1. **按组件名匹配** → 路由关键词列对应域');
-  routerLines.push('2. **跨仓库依赖问题** → 查 graph-index.json 的 DEPENDS_ON 边');
+  routerLines.push('2. **Cross-repository HTTP dependencies** → inspect CALLS_HTTP and httpContracts in graph-index.json');
   routerLines.push('3. **接口/API 问题** → 优先匹配有 interfaces.md 的仓库');
   routerLines.push('4. **调用链/排障** → 查对应仓库的 dependency-paths.md');
   routerLines.push('5. **模块职责概述** → 查 overview.md 或 modules/*.md');

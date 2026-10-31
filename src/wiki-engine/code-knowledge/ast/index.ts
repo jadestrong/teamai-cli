@@ -4,11 +4,11 @@ import type { CodeCollectedFile } from "../code-collector.js";
 import { type CodeFact } from "../code-extractors.js";
 import { structuralEdgesToCodeFacts, unresolvedImportsToGaps } from "./adapt-code-facts.js";
 import { buildImportBindingsForFile, callResolutionWeight, resolveCallSites } from "./call-resolver.js";
-import { buildFileExistenceChecker, resolveImportSpecifier } from "./import-resolver.js";
+import { buildFileExistenceChecker, resolveImportSpecifier, resetImportResolverCache } from "./import-resolver.js";
 import type { SwiftMemberName } from "./module-scope.js";
 import { buildSwiftModuleSymbolIndex, findSwiftModuleSymbol } from "./module-scope.js";
 import { ensureAstReady } from "./parser-registry.js";
-import type { AstExtractionGap, AstImplementsSite, StructuralEdge, StructuralGraphResult } from "./types.js";
+import type { AstExtractionGap, AstHttpEndpoint, AstImplementsSite, StructuralEdge, StructuralGraphResult } from "./types.js";
 import { isAstParseableFile, walkFile } from "./walk.js";
 
 const require = createRequire(import.meta.url);
@@ -43,6 +43,7 @@ export async function extractStructuralGraph(
   options: ExtractStructuralGraphOptions
 ): Promise<StructuralGraphResult> {
   await ensureAstReady();
+  resetImportResolverCache();
 
   const { repoRoot, files } = options;
   const symbols: StructuralGraphResult["symbols"] = [];
@@ -50,6 +51,7 @@ export async function extractStructuralGraph(
   const swiftMemberNames: SwiftMemberName[] = [];
   const imports: StructuralGraphResult["imports"] = [];
   const callSites: StructuralGraphResult["callSites"] = [];
+  const httpEndpoints: AstHttpEndpoint[] = [];
   const implementsSites: AstImplementsSite[] = [];
   const gaps: AstExtractionGap[] = [];
   const edges: StructuralEdge[] = [];
@@ -59,13 +61,18 @@ export async function extractStructuralGraph(
 
   let filesParsed = 0;
   let filesSkipped = 0;
+  let filesFailed = 0;
+  let filesUnsupported = 0;
 
   for (const file of files) {
     if (!isAstParseableFile(file.relativePath)) {
       filesSkipped++;
+      filesUnsupported++;
       continue;
     }
     const walked = walkFile(file);
+    const failed = walked.parseErrors.some((error) => /^(?:skipped large file|parse failed|parse returned null|syntax error):/u.test(error));
+    if (failed) filesFailed++;
     if (walked.parseErrors.length > 0) {
       for (const err of walked.parseErrors) {
         gaps.push({ kind: "PARSE_SKIP", message: err, sources: [file.relativePath] });
@@ -75,12 +82,13 @@ export async function extractStructuralGraph(
         continue;
       }
     }
-    filesParsed++;
+    if (!failed) filesParsed++;
     symbols.push(...walked.symbols);
     swiftModuleSymbols.push(...walked.swiftModuleSymbols);
     swiftMemberNames.push(...walked.swiftMemberNames);
     imports.push(...walked.imports);
     callSites.push(...walked.callSites);
+    httpEndpoints.push(...walked.httpEndpoints);
     implementsSites.push(...walked.implementsSites);
   }
 
@@ -103,11 +111,28 @@ export async function extractStructuralGraph(
   const resolvedImports = new Map<string, Awaited<ReturnType<typeof resolveImportSpecifier>>>();
   const resolvedKeys = new Set<string>();
 
+  const javaImports = new Map<string, string[]>();
+  for (const file of files.filter((candidate) => candidate.relativePath.endsWith(".java"))) {
+    const pkg = /^\s*package\s+([\w.]+)\s*;/mu.exec(file.content)?.[1];
+    if (!pkg) continue;
+    const key = `${pkg}.${file.relativePath.split("/").at(-1)!.replace(/\.java$/u, "")}`;
+    javaImports.set(key, [...(javaImports.get(key) ?? []), file.relativePath]);
+  }
+
   for (const imp of imports) {
     const key = `${imp.fromFile}:${imp.line}`;
     if (imp.isTypeOnly) continue;
 
-    const resolved = await resolveImportSpecifier(repoRoot, imp.fromFile, imp.specifier, fileExists);
+    let resolved: Awaited<ReturnType<typeof resolveImportSpecifier>>;
+    if (imp.fromFile.endsWith(".java")) {
+      let javaKey = imp.specifier;
+      // Static member and nested-type imports depend on the enclosing class.
+      while (!javaImports.has(javaKey) && javaKey.includes(".")) javaKey = javaKey.slice(0, javaKey.lastIndexOf("."));
+      const candidates = imp.specifier.endsWith(".*") ? [] : javaImports.get(javaKey) ?? [];
+      if (candidates.length === 1) resolved = { targetFile: candidates[0], confidence: "EXTRACTED" };
+    } else {
+      resolved = await resolveImportSpecifier(repoRoot, imp.fromFile, imp.specifier, fileExists);
+    }
     resolvedImports.set(key, resolved);
     if (resolved) {
       resolvedKeys.add(key);
@@ -205,13 +230,16 @@ export async function extractStructuralGraph(
     callsResolved: resolvedCalls.filter((c) => c.resolvedTargetFile).length,
     edges: edges.length,
     filesParsed,
-    filesSkipped
+    filesSkipped,
+    filesFailed,
+    filesUnsupported,
   };
 
   return {
     symbols,
     imports,
     callSites: resolvedCalls,
+    httpEndpoints,
     edges,
     gaps,
     stats

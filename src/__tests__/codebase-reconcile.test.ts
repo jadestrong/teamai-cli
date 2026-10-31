@@ -318,7 +318,7 @@ describe('codebase reconciliation', () => {
   it('rejects invalid node metadata without overwriting it', async () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
-    const invalidGraph = '{"schemaVersion":"team-wiki.graph-index.v1","generatedAt":"bad","nodes":[{"slug":"bad","type":"invalid","confidence":"invalid","title":"Bad"}],"edges":[{"from":"bad","to":"bad","relation":"invalid"}]}';
+    const invalidGraph = '{"schemaVersion":"team-wiki.graph-index.v2","generatedAt":"bad","nodes":[{"slug":"bad","type":"invalid","confidence":"invalid","title":"Bad"}],"edges":[{"from":"bad","to":"bad","relation":"invalid"}]}';
     fs.mkdirSync(path.dirname(graphPath), { recursive: true });
     fs.writeFileSync(graphPath, invalidGraph);
 
@@ -341,7 +341,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const invalidGraph = JSON.stringify({
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       ...contents,
     });
@@ -358,7 +358,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const repoGraphPath = path.join(root, 'teamwiki', 'evidence', 'code', 'auth', '.indices', 'graph-index.json');
     const legacyGraph = {
-      schemaVersion: 1,
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [
         { id: 'a/client', label: 'Client', type: 'module', confidence: 'high' },
@@ -383,7 +383,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const extractorGraph = {
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [
         { slug: 'component/a', title: 'a', type: 'component', confidence: 'EXTRACTED' },
@@ -413,7 +413,7 @@ describe('codebase reconciliation', () => {
     const repoGraphPath = path.join(root, 'teamwiki', 'evidence', 'code', 'auth', '.indices', 'graph-index.json');
     fs.mkdirSync(path.dirname(repoGraphPath), { recursive: true });
     fs.writeFileSync(repoGraphPath, JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [{ slug: 'component/a', title: 'a', type: 'component', confidence: 'EXTRACTED' }],
       edges: [{ from: 'src/a.ts', to: 'src/b.ts', relation: 'DEPENDS_ON', source: 'code-ast' }],
@@ -445,7 +445,7 @@ describe('codebase reconciliation', () => {
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     fs.mkdirSync(path.dirname(graphPath), { recursive: true });
     fs.writeFileSync(graphPath, JSON.stringify({
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [],
       edges: [{
@@ -473,7 +473,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const invalidGraph = {
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [{ slug: 'manual', title: 'Manual', type: 'component', confidence: 'EXTRACTED' }],
       edges: [{ from: 'manual', to: 'missing', relation: 'MAPS_TO', source: 'manual-mapping' }],
@@ -490,7 +490,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const duplicateGraph = JSON.stringify({
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [
         { slug: 'duplicate', title: 'First', type: 'component', confidence: 'EXTRACTED' },
@@ -514,7 +514,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const duplicateGraph = JSON.stringify({
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [
         { slug: 'a', title: 'A', type: 'component', confidence: 'EXTRACTED' },
@@ -522,7 +522,7 @@ describe('codebase reconciliation', () => {
       ],
       edges: [
         { from: 'a', to: 'b', relation: 'REFERENCES', source: 'manual-mapping' },
-        { from: 'a', to: 'b', relation: 'REFERENCES', source: 'doc-semantic' },
+        { from: 'a', to: 'b', relation: 'REFERENCES', source: 'manual-mapping' },
       ],
     });
     fs.mkdirSync(path.dirname(graphPath), { recursive: true });
@@ -541,7 +541,7 @@ describe('codebase reconciliation', () => {
     const root = createWikiFixture();
     const graphPath = path.join(root, 'teamwiki', '.indices', 'graph-index.json');
     const graph = {
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: '2026-01-01',
       nodes: [
         { slug: 'a|b', title: 'A pipe B', type: 'component', confidence: 'EXTRACTED' },
@@ -600,14 +600,14 @@ describe('codebase reconciliation', () => {
     await extractCodebase({ path: root, project: 'auth', json: true });
     const extracted = await loadGraphIndex(path.join(root, 'teamwiki'));
     expect(extracted?.edges).toContainEqual(
-      expect.objectContaining({ from: 'src/auth.ts', to: 'src/auth.ts', relation: 'IMPLEMENTS', source: 'code-ast' }),
+      expect.objectContaining({ from: 'code://auth/src/auth.ts', to: 'code://auth/src/auth.ts', relation: 'IMPLEMENTS', source: 'code-ast' }),
     );
 
     await expect(codebaseCmd({ reconcile: true, output: root, json: true })).resolves.toBeUndefined();
 
     const reconciled = await loadGraphIndex(path.join(root, 'teamwiki'));
     expect(reconciled?.edges).toContainEqual(
-      expect.objectContaining({ from: 'src/auth.ts', to: 'src/auth.ts', relation: 'IMPLEMENTS' }),
+      expect.objectContaining({ from: 'code://auth/src/auth.ts', to: 'code://auth/src/auth.ts', relation: 'IMPLEMENTS' }),
     );
   });
 });

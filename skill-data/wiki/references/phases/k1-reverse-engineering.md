@@ -18,6 +18,8 @@ Scan by priority (see phase0-collection.md for details):
 
 ### Step 3: Architecture reverse-engineering (see phase1-reverse-engineering.md for details)
 
+When using `teamai import`, inspect the v2 graph's `httpContracts` observations and coverage. Code files use `code://<origin>/<relative-path>` identities. Java/Spring endpoints use module application configuration. Only a unique method/full-path/resolved-service match creates `CALLS_HTTP`; dynamic hosts, gateway rewrites without configuration evidence and ambiguous endpoints remain unresolved or candidates. Do not connect repositories by matching component names. Re-import source to rebuild a v1 graph; incremental imports rebuild changed snapshots to refresh dependent contracts.
+
 - Bottom-up layering: leaf nodes (DB/MQ) → intermediate nodes (orchestration/scheduling) → root nodes (API entry points)
 - Three-layer penetration tracing: for ≥5 core APIs, complete the full call chain trace API entry → orchestration layer → service execution layer
 - Build the N×N component relationship matrix (annotate the communication method: RPC/MQ/DB)

@@ -116,6 +116,7 @@ async function loadReconciliationBase(wikiRoot: string): Promise<GraphIndex> {
     graph.nodes,
     graph.edges.filter(edge => edge.source !== BRIDGE_EDGE_SOURCE),
   );
+  base.httpContracts = graph.httpContracts;
   const hasUnexpectedSelfLoop = base.edges.some(edge => edge.from === edge.to && !isExpectedSelfLoop(edge));
   if (
     hasUnexpectedSelfLoop
@@ -496,6 +497,7 @@ export async function reconcileKnowledge(options: ReconcileOptions): Promise<Rec
       createGraphIndex(refreshedNodes, newEdges),
       createGraphIndex([], baseEdges),
     );
+    merged.httpContracts = existing.httpContracts;
     if (!(await graphUnchanged(wikiRoot, merged))) await saveGraphIndex(wikiRoot, merged);
   }
 

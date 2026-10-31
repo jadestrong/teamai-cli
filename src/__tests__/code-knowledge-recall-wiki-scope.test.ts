@@ -108,22 +108,23 @@ describe('queryCodeKnowledge: withheldCodebases', () => {
       // cross-repo edge detection exercised by graph-aggregate.test.ts.
       page('svc-a', 'overview.md', '---\ntitle: Svc A overview\nsource: a/client\n---\n\nnarwhal contract details for svc-a.\n');
       repoGraph('svc-a', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'a/client', title: 'BalanceClient', type: 'component', confidence: 'EXTRACTED' }],
         edges: [{ from: 'a/client', to: 'libs/balance_service.py', relation: 'imports' }],
       });
       repoGraph('svc-b', {
-        schemaVersion: 1, generatedAt: '2026-01-01',
+        schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
         nodes: [{ slug: 'b/service', title: 'BalanceService', type: 'component', confidence: 'EXTRACTED' }],
         edges: [],
       });
     });
 
-    it('surfaces a cross-codebase relatedFile when nothing is withheld, as before', async () => {
+    it('retains the local dependency without inventing a cross-codebase relatedFile from its name', async () => {
       await aggregateGlobalGraph(wikiRoot);
       const results = await queryCodeKnowledge('narwhal', { wikiRoot, depth: 'lookup', limit: 10 });
       const svcA = results.find((r) => r.page === 'evidence/code/svc-a/overview.md');
-      expect(svcA?.relatedFiles).toContain('b/service');
+      expect(svcA?.relatedFiles).toContain('libs/balance_service.py');
+      expect(svcA?.relatedFiles).not.toContain('b/service');
     });
 
     it('never surfaces a withheld codebase\'s node as a relatedFile, even via a cross-codebase graph edge', async () => {

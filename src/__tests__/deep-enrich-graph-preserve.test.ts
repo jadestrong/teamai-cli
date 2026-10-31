@@ -20,7 +20,7 @@ vi.mock('../tool-launch/call.js', async (importOriginal) => ({
 import { deepEnrich } from '../deep-enrich.js';
 
 const AST_GRAPH = {
-  schemaVersion: 'team-wiki.graph-index.v1',
+  schemaVersion: 'team-wiki.graph-index.v2',
   generatedAt: '2026-01-01T00:00:00Z',
   nodes: [
     { slug: 'component/A', type: 'component', confidence: 'EXTRACTED', title: 'A' },

@@ -12,7 +12,7 @@ import {
 } from "./import-bindings.js";
 import type { SwiftMemberName } from "./module-scope.js";
 import { grammarForExtension, getLanguage, getParser, getQuery } from "./parser-registry.js";
-import type { AstCallSite, AstImplementsSite, AstImport, AstSymbol, AstSymbolKind } from "./types.js";
+import type { AstCallSite, AstHttpEndpoint, AstImplementsSite, AstImport, AstSymbol, AstSymbolKind } from "./types.js";
 
 export interface FileWalkResult {
   symbols: AstSymbol[];
@@ -37,6 +37,7 @@ export interface FileWalkResult {
   imports: AstImport[];
   callSites: AstCallSite[];
   implementsSites: AstImplementsSite[];
+  httpEndpoints: AstHttpEndpoint[];
   parseErrors: string[];
 }
 
@@ -53,15 +54,16 @@ export function walkFile(file: CodeCollectedFile): FileWalkResult {
   const imports: AstImport[] = [];
   const callSites: AstCallSite[] = [];
   const implementsSites: AstImplementsSite[] = [];
+  const httpEndpoints: AstHttpEndpoint[] = [];
   const parseErrors: string[] = [];
 
   if (!isAstParseableFile(file.relativePath)) {
-    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, parseErrors };
+    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, httpEndpoints, parseErrors };
   }
 
   if (Buffer.byteLength(file.content, "utf8") > MAX_FILE_BYTES) {
     parseErrors.push(`skipped large file: ${file.relativePath}`);
-    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, parseErrors };
+    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, httpEndpoints, parseErrors };
   }
 
   const variant = grammarForExtension(path.extname(file.relativePath))!;
@@ -74,12 +76,12 @@ export function walkFile(file: CodeCollectedFile): FileWalkResult {
     tree = parser.parse(file.content);
   } catch (error) {
     parseErrors.push(`parse failed: ${file.relativePath}: ${error instanceof Error ? error.message : String(error)}`);
-    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, parseErrors };
+    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, httpEndpoints, parseErrors };
   }
 
   if (!tree) {
     parseErrors.push(`parse returned null: ${file.relativePath}`);
-    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, parseErrors };
+    return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, httpEndpoints, parseErrors };
   }
 
   try {
@@ -96,6 +98,14 @@ export function walkFile(file: CodeCollectedFile): FileWalkResult {
         swiftMemberNames.push({ file: file.relativePath, name });
       }
     }
+    if (variant === "java") {
+      if (tree.rootNode.hasError) parseErrors.push(`syntax error: ${file.relativePath}`);
+      else {
+        const spring = collectSpringEndpoints(tree.rootNode, file.relativePath);
+        httpEndpoints.push(...spring.endpoints);
+        parseErrors.push(...spring.gaps);
+      }
+    }
 
     for (const match of query.matches(tree.rootNode)) {
       const byName = new Map(match.captures.map((c) => [c.name, c.node]));
@@ -104,7 +114,7 @@ export function walkFile(file: CodeCollectedFile): FileWalkResult {
         const stmt = byName.get("import.stmt")!;
         const specNode = byName.get("import.spec");
         if (!specNode) continue;
-        const specifier = normalizeImportSpecifier(specNode.text, variant);
+        const specifier = normalizeImportSpecifier(specNode.text, variant) + (variant === "java" && /\.\*\s*;/u.test(stmt.text) ? ".*" : "");
         const line = stmt.startPosition.row + 1;
         const isTypeOnly = isTypeOnlyImport(stmt.text, variant);
         imports.push({
@@ -190,7 +200,124 @@ export function walkFile(file: CodeCollectedFile): FileWalkResult {
     tree.delete();
   }
 
-  return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, parseErrors };
+  return { symbols, swiftModuleSymbols, swiftMemberNames, imports, callSites, implementsSites, httpEndpoints, parseErrors };
+}
+
+const SPRING_MAPPING_METHODS: Record<string, string[] | undefined> = {
+  GetMapping: ["GET"], PostMapping: ["POST"], PutMapping: ["PUT"],
+  DeleteMapping: ["DELETE"], PatchMapping: ["PATCH"], RequestMapping: undefined,
+};
+
+function collectSpringEndpoints(root: Node, file: string): { endpoints: AstHttpEndpoint[]; gaps: string[] } {
+  const endpoints: AstHttpEndpoint[] = [];
+  const gaps: string[] = [];
+  for (const node of namedChildrenOf(root)) collectSpringFromNode(node, file, endpoints, gaps);
+  return { endpoints, gaps };
+}
+
+function collectSpringFromNode(node: Node, file: string, endpoints: AstHttpEndpoint[], gaps: string[]): void {
+  if (node.type === "class_declaration") {
+    const controller = node.childForFieldName("name")?.text;
+    const modifiers = modifiersOf(node);
+    const annotations = modifiers ? namedChildrenOf(modifiers).filter((child) => child.type === "annotation" || child.type === "marker_annotation") : [];
+    if (controller && annotations.some((annotation) => annotationName(annotation) === "Controller" || annotationName(annotation) === "RestController")) {
+      const classMapping = mappingOf(annotations, file, gaps);
+      const hasClassMapping = annotations.some((annotation) => (annotationName(annotation) ?? '') in SPRING_MAPPING_METHODS);
+      if (hasClassMapping && !classMapping) return;
+      const body = node.childForFieldName("body");
+      if (body) {
+        for (const method of namedChildrenOf(body).filter((child) => child.type === "method_declaration")) {
+          const methodName = method.childForFieldName("name")?.text;
+          const methodModifiers = modifiersOf(method);
+          const methodAnnotations = methodModifiers ? namedChildrenOf(methodModifiers).filter((child) => child.type === "annotation" || child.type === "marker_annotation") : [];
+          const methodMapping = mappingOf(methodAnnotations, file, gaps);
+          if (!methodName || !methodMapping) continue;
+          const bases = classMapping?.paths ?? [""];
+          const paths = bases.flatMap((base) => methodMapping.paths.map((part) => joinSpringPath(base, part)));
+          endpoints.push({ file, line: method.startPosition.row + 1, methods: methodMapping.methods ?? classMapping?.methods, paths, controller, handler: methodName, confidence: "EXTRACTED" });
+        }
+      }
+    }
+  }
+  for (const child of namedChildrenOf(node)) collectSpringFromNode(child, file, endpoints, gaps);
+}
+
+function annotationName(annotation: Node): string | undefined {
+  return annotation.childForFieldName("name")?.text.split(".").at(-1);
+}
+
+function modifiersOf(node: Node): Node | undefined {
+  return namedChildrenOf(node).find((child) => child.type === "modifiers");
+}
+
+function mappingOf(annotations: Node[], file: string, gaps: string[]): { paths: string[]; methods?: string[] } | undefined {
+  const annotation = annotations.find((candidate) => {
+    const name = annotationName(candidate);
+    return name !== undefined && name in SPRING_MAPPING_METHODS;
+  });
+  if (!annotation) return undefined;
+  const name = annotationName(annotation)!;
+  const args = annotation.childForFieldName("arguments");
+  const paths = annotationPaths(args);
+  if (paths === undefined) {
+    gaps.push(`unresolved Spring ${name} path: ${file}:${annotation.startPosition.row + 1}`);
+    return undefined;
+  }
+  const explicitMethods = name === "RequestMapping" ? annotationMethods(args) : undefined;
+  if (name === "RequestMapping" && explicitMethods === undefined && hasMethodArgument(args)) {
+    gaps.push(`unresolved Spring RequestMapping method: ${file}:${annotation.startPosition.row + 1}`);
+    return undefined;
+  }
+  return { paths, methods: explicitMethods ?? SPRING_MAPPING_METHODS[name] };
+}
+
+function annotationPaths(args: Node | null): string[] | undefined {
+  if (!args) return [""];
+  const values: string[] = [];
+  const candidates = namedChildrenOf(args).filter((child) => child.type !== "element_value_pair" || ["path", "value"].includes(child.childForFieldName("key")?.text ?? ""));
+  for (const candidate of candidates) {
+    const value = candidate.type === "element_value_pair" ? candidate.childForFieldName("value") : candidate;
+    const strings = value ? stringValues(value) : undefined;
+    if (!strings) return undefined;
+    values.push(...strings);
+  }
+  return values.length > 0 ? values : [""];
+}
+
+function annotationMethods(args: Node | null): string[] | undefined {
+  if (!args) return undefined;
+  const pair = namedChildrenOf(args).find((child) => child.type === "element_value_pair" && child.childForFieldName("key")?.text === "method");
+  if (!pair) return undefined;
+  const values = pair.childForFieldName("value");
+  const methods = values ? requestMethodValues(values) : undefined;
+  return methods && methods.length > 0 ? methods : undefined;
+}
+
+function hasMethodArgument(args: Node | null): boolean {
+  return !!args && namedChildrenOf(args).some((child) => child.type === "element_value_pair" && child.childForFieldName("key")?.text === "method");
+}
+
+function stringValues(node: Node): string[] | undefined {
+  if (node.type === "string_literal") return /\$\{|\\/u.test(node.text) ? undefined : [node.text.slice(1, -1)];
+  if (node.type === "element_value_array_initializer") {
+    const values = namedChildrenOf(node).map(stringValues);
+    return values.every((value): value is string[] => value !== undefined) ? values.flat() : undefined;
+  }
+  return undefined;
+}
+
+function requestMethodValues(node: Node): string[] | undefined {
+  if (node.type === "field_access") return [node.childForFieldName("field")?.text ?? ""];
+  if (node.type === "element_value_array_initializer") {
+    const values = namedChildrenOf(node).map(requestMethodValues);
+    return values.every((value): value is string[] => value !== undefined) ? values.flat() : undefined;
+  }
+  return undefined;
+}
+
+function joinSpringPath(base: string, part: string): string {
+  const joined = `${base}/${part}`.replace(/\/+/g, "/");
+  return joined.startsWith("/") ? joined : `/${joined}`;
 }
 
 /**

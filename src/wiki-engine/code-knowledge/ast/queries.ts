@@ -174,3 +174,21 @@ export const SWIFT_AST_QUERY_SOURCE = `
   )
 ) @impl.stmt
 `;
+
+export const JAVA_AST_QUERY_SOURCE = `
+(import_declaration
+  (scoped_identifier) @import.spec
+) @import.stmt
+
+(class_declaration
+  name: (identifier) @symbol.name
+) @symbol.class
+
+(interface_declaration
+  name: (identifier) @symbol.name
+) @symbol.interface
+
+(method_declaration
+  name: (identifier) @symbol.name
+) @symbol.function
+`;

@@ -13,6 +13,7 @@ import { IWikiClient } from './utils/iwiki-client.js';
 import type { IWikiDocument, IWikiPage } from './utils/iwiki-client.js';
 import { log, spinner } from './utils/logger.js';
 import { pathExists } from './utils/fs.js';
+import { parseGraphIndex, graphEdgeKey, type GraphEdge } from './wiki-engine/core/graph-index.schema.js';
 
 // ─── 内部辅助函数 ──────────────────────────────────────────────
 
@@ -258,7 +259,8 @@ export async function reconcileIwikiWithCodebase(
 ): Promise<MapsToEdge[]> {
   const graphPath = path.join(teamwikiRoot, '.indices', 'graph-index.json');
   const graphRaw = await readFile(graphPath, 'utf-8');
-  const graph = JSON.parse(graphRaw);
+  const graph = parseGraphIndex(JSON.parse(graphRaw));
+  if (!graph) throw new Error('Cannot reconcile a legacy or invalid graph; re-extract it from source');
 
   // 收集代码节点的标签用于匹配 — 连同该节点此刻的 origin 一并记录：
   // 之后若另一个 codebase 碰撞出相同的无前缀 slug 并赢得 merge，这里捕获的
@@ -266,15 +268,21 @@ export async function reconcileIwikiWithCodebase(
   // `label`/`id` 为旧字段名的回退：当前 schema 写入的节点用的是
   // `title`/`slug`（本函数对 graph-index.json 做的是原始 JSON.parse，不经过
   // loadGraphIndex 的字段归一化）。
-  const codeLabels = new Map<string, { id: string; origin?: string }>();
+  const codeLabels = new Map<string, Map<string, { id: string; origin?: string }>>();
+  const addLabel = (label: string, id: string, origin?: string) => {
+    const candidates = codeLabels.get(label) ?? new Map();
+    candidates.set(id, { id, origin });
+    codeLabels.set(label, candidates);
+  };
   for (const node of graph.nodes) {
-    const label: string | undefined = node.label ?? node.title;
-    const id: string | undefined = node.id ?? node.slug;
+    if (!node.origin && !node.slug.startsWith('code://') && !node.slug.startsWith('evidence/code/')) continue;
+    const label = node.title;
+    const id = node.slug;
     if (!label || !id) continue;
-    codeLabels.set(label.toLowerCase(), { id, origin: node.origin });
+    addLabel(label.toLowerCase(), id, node.origin);
     // 也索引 PascalCase 拆分后的单词
     const words = label.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
-    codeLabels.set(words, { id, origin: node.origin });
+    addLabel(words, id, node.origin);
   }
 
   // 加载代码事实页面内容用于全文匹配
@@ -303,7 +311,8 @@ export async function reconcileIwikiWithCodebase(
 
     for (const term of terms) {
       // 方式 1：术语直接匹配代码节点标签
-      const directMatch = codeLabels.get(term.toLowerCase());
+      const directMatches = codeLabels.get(term.toLowerCase());
+      const directMatch = directMatches?.size === 1 ? [...directMatches.values()][0] : undefined;
       if (directMatch) {
         const key = `${docSlug}|${directMatch.id}`;
         if (!edgeSet.has(key)) {
@@ -312,14 +321,16 @@ export async function reconcileIwikiWithCodebase(
         }
         continue;
       }
+      if (directMatches && directMatches.size > 1) continue;
 
       // 方式 2：术语在代码事实页面全文中出现
-      for (const [pagePath, content] of codePageContents) {
+      const pages = [...codePageContents].filter(([, content]) => term.length > 3 && content.toLowerCase().includes(term.toLowerCase()));
+      for (const [pagePath, content] of pages.length === 1 ? pages : []) {
         if (content.toLowerCase().includes(term.toLowerCase()) && term.length > 3) {
           const key = `${docSlug}|${pagePath}`;
           if (!edgeSet.has(key)) {
             edgeSet.add(key);
-            mapsToEdges.push({ from: docSlug, to: pagePath, relation: 'MAPS_TO', term, confidence: 0.6 });
+            mapsToEdges.push({ from: docSlug, to: pagePath.replace(/\.md$/u, ''), relation: 'MAPS_TO', term, confidence: 0.6, origin: pagePath.split('/')[2] });
           }
           break; // 每个术语最多匹配一个 code page
         }
@@ -329,14 +340,22 @@ export async function reconcileIwikiWithCodebase(
 
   // 写入 graph-index.json（去重：按 from+to+relation 三元组）
   if (mapsToEdges.length > 0) {
-    const existingKeys = new Set(
-      graph.edges.map((e: { from: string; to: string; relation: string }) => `${e.from}|${e.to}|${e.relation}`),
-    );
+    const existingKeys = new Set(graph.edges.map(graphEdgeKey));
+    const nodeIds = new Set(graph.nodes.map((node) => node.slug));
     for (const edge of mapsToEdges) {
-      const key = `${edge.from}|${edge.to}|${edge.relation}`;
+      if (!nodeIds.has(edge.from)) {
+        graph.nodes.push({ slug: edge.from, title: documents.find((doc) => edge.from === `iwiki/p/${doc.docid}`)?.title ?? edge.from, type: 'source', confidence: 'INFERRED', source: 'doc-semantic' });
+        nodeIds.add(edge.from);
+      }
+      if (!nodeIds.has(edge.to)) {
+        graph.nodes.push({ slug: edge.to, title: path.posix.basename(edge.to), type: 'component', confidence: 'INFERRED', origin: edge.origin, source: 'doc-semantic' });
+        nodeIds.add(edge.to);
+      }
+      const persisted: GraphEdge = { from: edge.from, to: edge.to, relation: edge.relation, origin: edge.origin, source: 'doc-semantic', weight: edge.confidence, evidence: [{ ref: edge.from, note: `Document term: ${edge.term}` }] };
+      const key = graphEdgeKey(persisted);
       if (!existingKeys.has(key)) {
         existingKeys.add(key);
-        graph.edges.push(edge);
+        graph.edges.push(persisted);
       }
     }
     await writeFile(graphPath, JSON.stringify(graph, null, 2), 'utf-8');

@@ -4,7 +4,10 @@ import path from 'node:path';
 import chalk from 'chalk';
 
 import { pathExists } from './utils/fs.js';
-import type { GraphIndex } from './wiki-engine/adapters/index.js';
+import { GRAPH_INDEX_SCHEMA_VERSION, parseGraphIndex, type GraphIndex } from './wiki-engine/adapters/index.js';
+import { validateGraph, graphEdgeKey } from './wiki-engine/core/graph-index.schema.js';
+import { codeFileId } from './wiki-engine/code-knowledge/code-identity.js';
+import { matchHttpContracts, httpMatchesToGraphEdges, httpContractCoverage } from './wiki-engine/code-knowledge/http-contract.js';
 
 export type WikiLintSeverity = 'high' | 'medium' | 'low' | 'info';
 
@@ -58,18 +61,27 @@ export async function lintTeamwiki(opts: {
       severity: 'high',
       category: 'graph-missing',
       location: 'teamwiki/.indices/graph-index.json',
-      message: 'graph-index.json 不存在，知识图谱未构建',
+      message: 'graph-index.json does not exist; build the knowledge graph',
     });
   } else {
     try {
       const raw = await readFile(graphPath, 'utf-8');
-      graph = JSON.parse(raw) as GraphIndex;
+      const parsed = JSON.parse(raw);
+      graph = parseGraphIndex(parsed);
+      if (!graph || parsed.schemaVersion !== GRAPH_INDEX_SCHEMA_VERSION) {
+        addIssue({
+          severity: 'high',
+          category: 'graph-rebuild-required',
+          location: 'teamwiki/.indices/graph-index.json',
+          message: `graph-index.json is not ${GRAPH_INDEX_SCHEMA_VERSION}; rebuild it from source`,
+        });
+      }
     } catch {
       addIssue({
         severity: 'high',
         category: 'graph-corrupt',
         location: graphPath,
-        message: 'graph-index.json 解析失败',
+        message: 'Cannot parse graph-index.json',
       });
     }
   }
@@ -81,7 +93,7 @@ export async function lintTeamwiki(opts: {
       severity: 'high',
       category: 'evidence-missing',
       location: 'teamwiki/evidence/code/',
-      message: 'evidence 目录不存在，无代码事实页',
+      message: 'Code evidence directory does not exist',
     });
   } else {
     const projects = await readdir(evidenceDir);
@@ -90,7 +102,7 @@ export async function lintTeamwiki(opts: {
         severity: 'medium',
         category: 'evidence-empty',
         location: 'teamwiki/evidence/code/',
-        message: 'evidence 目录为空，未提取任何项目',
+        message: 'Code evidence directory is empty',
       });
     }
 
@@ -99,7 +111,7 @@ export async function lintTeamwiki(opts: {
       const pStat = await stat(projectDir).catch(() => null);
       if (!pStat?.isDirectory()) {
         if (!pStat) {
-          addIssue({ severity: 'low', category: 'stat-failed', location: `evidence/code/${project}`, message: '无法读取目录状态' });
+          addIssue({ severity: 'low', category: 'stat-failed', location: `evidence/code/${project}`, message: 'Cannot read directory status' });
         }
         continue;
       }
@@ -110,7 +122,7 @@ export async function lintTeamwiki(opts: {
           severity: 'low',
           category: 'missing-index',
           location: `evidence/code/${project}/`,
-          message: '缺少 index.md 总索引页',
+          message: 'Missing index.md overview',
         });
       }
     }
@@ -123,7 +135,7 @@ export async function lintTeamwiki(opts: {
         severity: 'low',
         category: 'nav-missing',
         location: `teamwiki/${navFile}`,
-        message: `导航文件 ${navFile} 不存在，知识库入口不完整`,
+        message: `Missing navigation file: ${navFile}`,
       });
     }
   }
@@ -135,7 +147,7 @@ export async function lintTeamwiki(opts: {
       severity: 'low',
       category: 'manifest-missing',
       location: 'teamwiki/source-manifest.json',
-      message: 'source-manifest.json 不存在，增量更新不可用',
+      message: 'Missing source-manifest.json; incremental updates are unavailable',
     });
   } else {
     try {
@@ -157,7 +169,7 @@ export async function lintTeamwiki(opts: {
         severity: 'low',
         category: 'manifest-corrupt',
         location: manifestPath,
-        message: 'source-manifest.json 解析失败',
+        message: 'Cannot parse source-manifest.json',
       });
     }
   }
@@ -165,6 +177,65 @@ export async function lintTeamwiki(opts: {
   // Graph health metrics
   let graphHealth = { nodeCount: 0, edgeCount: 0, orphanNodes: 0, connectivity: 0 };
   if (graph) {
+    const location = 'teamwiki/.indices/graph-index.json';
+    for (const issue of validateGraph(graph).issues) {
+      if (issue.code === 'edge.self_loop') continue; // Same-file IMPLEMENTS is valid.
+      addIssue({ severity: 'high', category: issue.code, location, message: issue.message });
+    }
+    const inconsistentCodeNodes = graph.nodes.filter((node) => {
+      if (!node.slug.startsWith('code://')) return false;
+      try { return !node.origin || !node.path || codeFileId(node.origin, node.path) !== node.slug; } catch { return true; }
+    });
+    if (inconsistentCodeNodes.length) addIssue({ severity: 'high', category: 'code-identity-mismatch', location, message: `${inconsistentCodeNodes.length} code node(s) have inconsistent origin, path or identity` });
+    const unscopedCodeNodes = graph.nodes.filter((node) => node.path && !node.slug.startsWith('code://'));
+    if (unscopedCodeNodes.length > 0) {
+      addIssue({
+        severity: 'high',
+        category: 'unscoped-code-identity',
+        location: 'teamwiki/.indices/graph-index.json',
+        message: `${unscopedCodeNodes.length} code file node(s) lack code:// scoped identities`,
+      });
+    }
+    const invalidHttpEdges = graph.edges.filter((edge) => edge.relation === 'CALLS_HTTP' &&
+      (edge.source !== 'code-http' || (edge.evidence?.length ?? 0) < 2));
+    if (invalidHttpEdges.length > 0) {
+      addIssue({
+        severity: 'high',
+        category: 'http-evidence-missing',
+        location: 'teamwiki/.indices/graph-index.json',
+        message: `${invalidHttpEdges.length} CALLS_HTTP edge(s) lack extractor provenance or both endpoint evidences`,
+      });
+    }
+    const contracts = graph.httpContracts;
+    const matches = contracts ? matchHttpContracts(contracts.requests, contracts.endpoints) : [];
+    const formal = httpMatchesToGraphEdges(matches);
+    const expected = new Set(formal.map(graphEdgeKey));
+    const actual = new Set(graph.edges.filter((edge) => edge.relation === 'CALLS_HTTP').map(graphEdgeKey));
+    if ([...actual].some((key) => !expected.has(key)) || [...expected].some((key) => !actual.has(key))) {
+      addIssue({ severity: 'high', category: 'http-contract-mismatch', location, message: 'CALLS_HTTP edges do not match the unique method/path/service contracts' });
+    }
+    if (contracts) {
+      const nodeIds = new Set(graph.nodes.map((node) => node.slug));
+      const observations = [...contracts.requests, ...contracts.endpoints];
+      const missing = observations.filter((record) => {
+        try { return !nodeIds.has(codeFileId(record.origin, record.file)); } catch { return true; }
+      });
+      if (missing.length) addIssue({ severity: 'high', category: 'http-node-missing', location, message: `${missing.length} HTTP observation(s) reference missing code nodes` });
+      if (JSON.stringify(contracts.matches) !== JSON.stringify(matches)) addIssue({ severity: 'high', category: 'http-matches-stale', location, message: 'Persisted HTTP matches are missing or stale' });
+      const coverage = contracts.coverage;
+      if (coverage) {
+        const recomputed = httpContractCoverage(coverage.filesScanned, coverage.filesParsed, contracts.requests, contracts.endpoints, matches, coverage.filesFailed, coverage.filesUnsupported);
+        if (JSON.stringify(coverage) !== JSON.stringify(recomputed) || coverage.filesScanned !== coverage.filesParsed + coverage.filesFailed + (coverage.filesUnsupported ?? 0)) {
+          addIssue({ severity: 'high', category: 'http-coverage-mismatch', location, message: 'HTTP coverage does not reconcile with observations and file totals' });
+        }
+      }
+      for (const edge of graph.edges.filter((candidate) => candidate.relation === 'CALLS_HTTP')) {
+        const proofs = formal.filter((proof) => graphEdgeKey(proof) === graphEdgeKey(edge));
+        if (!proofs.every((proof) => proof.evidence?.every((item) => edge.evidence?.some((recorded) => JSON.stringify(recorded) === JSON.stringify(item))))) {
+          addIssue({ severity: 'high', category: 'http-evidence-mismatch', location, message: `CALLS_HTTP evidence is incomplete: ${edge.from} -> ${edge.to}` });
+        }
+      }
+    }
     const connectedNodes = new Set<string>();
     for (const edge of graph.edges) {
       connectedNodes.add(edge.from);
@@ -187,7 +258,7 @@ export async function lintTeamwiki(opts: {
         severity: 'medium',
         category: 'low-connectivity',
         location: 'teamwiki/.indices/graph-index.json',
-        message: `图谱连通性 ${(connectivity * 100).toFixed(0)}% 过低（${orphans.length} 个孤立节点）`,
+        message: `Graph connectivity is ${(connectivity * 100).toFixed(0)}% (${orphans.length} orphan nodes)`,
       });
     }
 
@@ -196,7 +267,7 @@ export async function lintTeamwiki(opts: {
         severity: 'high',
         category: 'no-edges',
         location: 'teamwiki/.indices/graph-index.json',
-        message: `图谱有 ${graph.nodes.length} 个节点但 0 条边，图谱构建可能失败`,
+        message: `Graph has ${graph.nodes.length} nodes but no edges; graph construction may have failed`,
       });
     }
   }
@@ -215,16 +286,16 @@ export async function lintTeamwiki(opts: {
 export function formatWikiLintReport(report: WikiLintReport): string {
   const lines: string[] = [];
 
-  lines.push(chalk.bold('=== teamwiki/ 知识图谱健康度检查 ==='));
+  lines.push(chalk.bold('=== teamwiki/ knowledge graph health ==='));
   lines.push('');
-  lines.push(`图谱: ${report.graphHealth.nodeCount} nodes, ${report.graphHealth.edgeCount} edges, 连通性 ${(report.graphHealth.connectivity * 100).toFixed(0)}%`);
+  lines.push(`Graph: ${report.graphHealth.nodeCount} nodes, ${report.graphHealth.edgeCount} edges, connectivity ${(report.graphHealth.connectivity * 100).toFixed(0)}%`);
   if (report.graphHealth.orphanNodes > 0) {
-    lines.push(chalk.dim(`  (${report.graphHealth.orphanNodes} 个孤立节点)`));
+    lines.push(chalk.dim(`  (${report.graphHealth.orphanNodes} orphan nodes)`));
   }
   lines.push('');
 
   if (report.issues.length === 0) {
-    lines.push(chalk.green('✓ 无问题'));
+    lines.push(chalk.green('✓ No issues'));
     return lines.join('\n');
   }
 
@@ -245,6 +316,6 @@ export function formatWikiLintReport(report: WikiLintReport): string {
     lines.push('');
   }
 
-  lines.push(`总计: ${report.summary.high} high, ${report.summary.medium} medium, ${report.summary.low} low, ${report.summary.info} info`);
+  lines.push(`Total: ${report.summary.high} high, ${report.summary.medium} medium, ${report.summary.low} low, ${report.summary.info} info`);
   return lines.join('\n');
 }

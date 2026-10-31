@@ -167,9 +167,11 @@ GitLab 的 `--from-org`，以及 GitHub `--from-org` 的 `gh` 路径与回退到
 
 AI 生成的 MR learning 中，`title` 不是字符串时，摘要和入队文件名使用 MR 标题；`tags` 只展示数组中的字符串项。不会为了修复元数据而改写草稿正文。
 
-`--incremental` 只重新提取上次导入后改过的文件，基线随每个代码库存在它自己的 `evidence/code/<slug>/` 里。远端仓库的 slug 是 `<provider>__<owner>__<repo>`，`--from-repo`、`--from-mr` 和 `teamai ci extract-mr` 用的都是它。checkout 的 `origin` 指向该仓库时，`--dir` 也用它；否则用仓库名或目录名，并且不会覆盖另一个远端仓库、同一仓库的另一个目录、或另一个没有 `origin` 的 checkout 在那里发布的 evidence。没有 `origin` 的 checkout，若同名 slug 已被另一个这样的 checkout 占用，则用 `<name>-<hash8>`；导入时输出的 `project:` 就是实际使用的 slug。
+`--incremental` 跳过未变化的源码快照。文件变化时会重建快照，使导入关系、API 定义和服务配置与未改动的调用文件保持一致。每个代码库的基线存在它自己的 `evidence/code/<slug>/` 里。远端仓库的 slug 是 `<provider>__<owner>__<repo>`，`--from-repo`、`--from-mr` 和 `teamai ci extract-mr` 用的都是它。checkout 的 `origin` 指向该仓库时，`--dir` 也用它；否则用仓库名或目录名，并且不会覆盖另一个远端仓库、同一仓库的另一个目录、或另一个没有 `origin` 的 checkout 在那里发布的 evidence。没有 `origin` 的 checkout，若同名 slug 已被另一个这样的 checkout 占用，则用 `<name>-<hash8>`；导入时输出的 `project:` 就是实际使用的 slug。
 
 `--max-files` 调整单个仓库采集源码文件的上限（默认 200）。采集按关键文件优先；文件数超出上限时会截断，并输出同时带两个计数的警告，不再静默丢弃。
+
+代码图谱 v2 使用 `code://<origin>/<relative-path>` 标识文件。Java AST 提取 Spring 控制器映射和各模块的应用配置；前端请求保留方法、路径和源码证据。正式 `CALLS_HTTP` 边要求方法、完整路径、已解析服务一致且端点唯一。动态主机、URL 和歧义匹配保留在 `httpContracts` 中，记录覆盖率和原因。名称或相似文件路径不会生成跨仓库依赖。网关路径改写需要明确的配置证据。v1 图谱必须重新导入源码重建。
 
 导入之后，用 `teamai codebase` 检查和加工同一份 `teamwiki/`：
 
@@ -250,7 +252,7 @@ teamai ci extract-mr --url "$MR_URL" --mode comment --individual-comments
 teamai ci extract-mr --url "$MR_URL" --mode write --team-repo ../team-repo --individual-comments
 ```
 
-write 模式在合并后的源码 checkout 里运行，代码知识走和 `teamai import --dir . --incremental` 相同的流程，写进 `<team-repo>/teamwiki/evidence/code/<provider>__<owner>__<repo>/`，只重新提取改过的文件。团队仓库要克隆在 checkout 之外，否则它的文件会被当成源码提取，这一步会被跳过。
+write 模式在合并后的源码 checkout 里运行，代码知识走和 `teamai import --dir . --incremental` 相同的流程，写进 `<team-repo>/teamwiki/evidence/code/<provider>__<owner>__<repo>/`，文件变化时重建快照。团队仓库要克隆在 checkout 之外，否则它的文件会被当成源码提取，这一步会被跳过。
 
 不要的建议打上拒绝标记：GitHub 和 GitLab 用 👎，工蜂用 ☝️。模板（GitHub Actions、GitLab CI、智研 / Coding CI）在 [`examples/ci/`](../../../examples/ci/README.zh-CN.md)。
 

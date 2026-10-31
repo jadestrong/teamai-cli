@@ -393,11 +393,11 @@ describe('Scala heuristic extractor', () => {
       'src/main/scala/com/demo/core/Invoice.scala',
     );
 
-    const graph = buildCodeGraph([...extractScala([gateway]), ...extractScala([invoice])]);
+    const graph = buildCodeGraph([...extractScala([gateway]), ...extractScala([invoice])], { origin: 'scala' });
     const edge = graph.edges.find((e) => e.relation === 'DEPENDS_ON');
 
-    expect(edge?.from).toBe('src/main/scala/com/demo/payments/Gateway.scala');
-    expect(edge?.to).toBe('src/main/scala/com/demo/core/Invoice.scala');
+    expect(edge?.from).toBe('code://scala/src/main/scala/com/demo/payments/Gateway.scala');
+    expect(edge?.to).toBe('code://scala/src/main/scala/com/demo/core/Invoice.scala');
   });
 
   it('scopes a brace import to the selected symbol, not the whole package directory', () => {
@@ -414,12 +414,12 @@ describe('Scala heuristic extractor', () => {
       'src/main/scala/com/demo/core/InternalAdmin.scala',
     );
 
-    const graph = buildCodeGraph([...extractScala([gateway]), ...extractScala([invoice]), ...extractScala([admin])]);
+    const graph = buildCodeGraph([...extractScala([gateway]), ...extractScala([invoice]), ...extractScala([admin])], { origin: 'scala' });
     const deps = graph.edges.filter((e) => e.relation === 'DEPENDS_ON');
 
     expect(deps).toHaveLength(1);
-    expect(deps[0].from).toBe('src/main/scala/com/demo/payments/Gateway.scala');
-    expect(deps[0].to).toBe('src/main/scala/com/demo/core/Invoice.scala');
+    expect(deps[0].from).toBe('code://scala/src/main/scala/com/demo/payments/Gateway.scala');
+    expect(deps[0].to).toBe('code://scala/src/main/scala/com/demo/core/Invoice.scala');
   });
 
   it('resolves a brace import in the call-chain tracer', () => {

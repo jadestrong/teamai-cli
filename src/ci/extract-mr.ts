@@ -334,7 +334,8 @@ export async function ciExtractMr(opts: CiExtractMrOptions): Promise<void> {
       const { files } = await collectCode({ root: businessRepo, changedFiles, maxFiles: 50 });
       if (files.length > 0) {
         const facts = extractCodeFacts(files);
-        const graph = buildCodeGraph(facts);
+        const { repoSlugForUrl } = await import('../import-repo.js');
+        const graph = buildCodeGraph(facts, { origin: repoSlugForUrl(result.repoUrl), files: files.map((file) => file.relativePath) });
         graphChangeSummary = {
           added: graph.nodes.map(n => `\`${n.type}:${n.title}\` (${n.slug})`),
           removed: [],

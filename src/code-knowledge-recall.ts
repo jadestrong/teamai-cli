@@ -13,6 +13,7 @@ import matter from 'gray-matter';
 import type { GraphIndex } from './wiki-engine/core/graph-index.schema.js';
 import { tokenize, tokenCount, MAX_TOKENIZE_CHARS } from './utils/tokenizer.js';
 import { caseFoldKey } from './manifest-schema.js';
+import { codeFileId } from './wiki-engine/code-knowledge/code-identity.js';
 
 export interface SourceAnchor {
   path: string;
@@ -160,21 +161,31 @@ function buildAdjacencyMap(graph: GraphIndex): Map<string, AdjEntry[]> {
  * B8 fix: Match page paths to graph node slugs via title/filename matching.
  * B24 fix: Use 2-hop neighbors (halved weight for second hop).
  */
+function pageMatchesNode(page: PageDoc, slug: string, graph: GraphIndex): boolean {
+  if (slug.startsWith('code://')) {
+    const origin = /^evidence\/code\/([^/]+)\//u.exec(page.path)?.[1];
+    if (!origin || !slug.startsWith(`code://${origin}/`)) return false;
+    return (page.sources ?? []).some((source) => {
+      const file = source.replace(/:\d+(?:-\d+)?$/u, '');
+      return file.startsWith('code://') ? file === slug : codeFileId(origin, file) === slug;
+    });
+  }
+  const node = graph.nodes.find((candidate) => candidate.slug === slug);
+  const origin = /^evidence\/code\/([^/]+)\//u.exec(page.path)?.[1];
+  if (node?.origin && origin && node.origin !== origin) return false;
+  const name = (slug.split('/').pop() ?? '').toLowerCase();
+  return !!name && (page.title.toLowerCase().includes(name) || page.path.replace(/^evidence\/code\/[^/]+\//u, '').includes(name));
+}
+
 function computeGraphBoost(
   page: PageDoc,
   entryNodes: Set<string>,
   graph: GraphIndex,
   adj: Map<string, AdjEntry[]>,
 ): number {
-  // Match page to graph nodes by title
-  const pageTitle = page.title.toLowerCase();
-  const pageFile = page.path.replace(/^evidence\/code\/[^/]+\//, '').replace('.md', '');
-
   // Check if this page IS an entry node (by title or slug match)
   for (const slug of entryNodes) {
-    const slugParts = slug.split('/');
-    const slugName = (slugParts.pop() ?? '').toLowerCase();
-    if (slugName && (pageTitle.includes(slugName) || pageFile.includes(slugName))) {
+    if (pageMatchesNode(page, slug, graph)) {
       return ENTRY_NODE_BOOST;
     }
   }
@@ -186,10 +197,7 @@ function computeGraphBoost(
     if (!neighbors) continue;
 
     for (const { neighbor: neighborSlug, relation } of neighbors) {
-      const neighborParts = neighborSlug.split('/');
-      const neighborName = (neighborParts.pop() ?? '').toLowerCase();
-
-      if (neighborName && (pageTitle.includes(neighborName) || pageFile.includes(neighborName))) {
+      if (pageMatchesNode(page, neighborSlug, graph)) {
         const relWeight = RELATION_WEIGHT[relation] ?? 1;
         const boost = relWeight * 0.8; // 1-hop
         if (boost > maxBoost) maxBoost = boost;
@@ -199,9 +207,7 @@ function computeGraphBoost(
       const hop2Neighbors = adj.get(neighborSlug);
       if (!hop2Neighbors) continue;
       for (const { neighbor: hop2Slug, relation: rel2 } of hop2Neighbors) {
-        const hop2Parts = hop2Slug.split('/');
-        const hop2Name = (hop2Parts.pop() ?? '').toLowerCase();
-        if (hop2Name && (pageTitle.includes(hop2Name) || pageFile.includes(hop2Name))) {
+        if (pageMatchesNode(page, hop2Slug, graph)) {
           const relWeight = RELATION_WEIGHT[rel2] ?? 1;
           const boost = relWeight * 0.4; // 2-hop: half weight
           if (boost > maxBoost) maxBoost = boost;
@@ -390,7 +396,8 @@ function sanitizeSources(sources: string[] | undefined): string[] | undefined {
       if (trimmed === '') return false;
       // Exclude URLs: http://, https://, or any other protocol via ://
       if (/^https?:\/\//i.test(trimmed)) return false;
-      if (trimmed.includes('://')) return false;
+      if (trimmed.includes('://') && !trimmed.startsWith('code://')) return false;
+      if (!trimmed.startsWith('code://') && (trimmed.startsWith('/') || trimmed.startsWith('../'))) return false;
       // Exclude bare directories (trailing slash)
       if (trimmed.endsWith('/')) return false;
       return true;
@@ -633,8 +640,11 @@ export async function queryCodeKnowledge(
     if (page.sources && page.sources.length > 0) {
       const sourceSet = new Set<string>(page.sources);
       const neighbors = new Set<string>();
+      const origin = /^evidence\/code\/([^/]+)\//u.exec(page.path)?.[1];
       for (const src of page.sources) {
-        const deps = forwardDeps.get(src);
+        const file = src.replace(/:\d+(?:-\d+)?$/u, '');
+        const scoped = origin && !file.startsWith('code://') ? codeFileId(origin, file) : file;
+        const deps = forwardDeps.get(scoped) ?? forwardDeps.get(file);
         if (deps) { for (const d of deps) { if (!sourceSet.has(d)) { neighbors.add(d); } } }
       }
       if (neighbors.size > 0) {

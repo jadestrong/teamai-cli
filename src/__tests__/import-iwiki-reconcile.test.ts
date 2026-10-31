@@ -32,7 +32,7 @@ describe('reconcileIwikiWithCodebase: direct-match MAPS_TO edges (#974 review ro
   it("tags a direct-match edge with the matched node's own origin, not left untagged", async () => {
     const teamwikiRoot = makeWikiRoot();
     writeRepoGraph(teamwikiRoot, 'svc-b', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [{ slug: 'component/App', title: 'App', type: 'component', confidence: 'high' }],
       edges: [],
     });
@@ -51,7 +51,7 @@ describe('reconcileIwikiWithCodebase: direct-match MAPS_TO edges (#974 review ro
   it("scopeGlobalGraph removes the persisted, origin-tagged edge once that codebase is withheld — even after its matched node is later reattributed to an allowed repo by a slug collision", async () => {
     const teamwikiRoot = makeWikiRoot();
     writeRepoGraph(teamwikiRoot, 'svc-b', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [{ slug: 'component/App', title: 'App', type: 'component', confidence: 'high' }],
       edges: [],
     });
@@ -76,7 +76,7 @@ describe('reconcileIwikiWithCodebase: direct-match MAPS_TO edges (#974 review ro
     appNode.title = 'UnrelatedApp';
     fs.writeFileSync(graphPath, JSON.stringify(graph));
     writeRepoGraph(teamwikiRoot, 'svc-c', {
-      schemaVersion: 1, generatedAt: '2026-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2026-01-01',
       nodes: [{ slug: 'component/App', title: 'UnrelatedApp', type: 'component', confidence: 'high' }],
       edges: [],
     });

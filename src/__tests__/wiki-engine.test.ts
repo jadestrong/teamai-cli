@@ -241,7 +241,7 @@ describe('buildIndexHubOverlay', () => {
 
   it('returns a valid GraphIndex with schemaVersion', () => {
     const result = buildIndexHubOverlay('p', 'out', ['out/p/x']);
-    expect(result.schemaVersion).toBe('team-wiki.graph-index.v1');
+    expect(result.schemaVersion).toBe('team-wiki.graph-index.v2');
     expect(result.generatedAt).toBeTruthy();
   });
 });

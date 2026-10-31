@@ -21,6 +21,8 @@ function makeFile(relativePath: string, content: string): CodeCollectedFile {
     ? 'python'
     : relativePath.endsWith('.go')
       ? 'go'
+      : relativePath.endsWith('.java')
+        ? 'java'
       : 'typescript';
   return {
     path: `/virtual/${relativePath}`,
@@ -140,6 +142,42 @@ describe('AST structural extraction (web-tree-sitter WASM)', () => {
     expect(result.stats.symbols).toBeGreaterThanOrEqual(2);
     // "fmt" is an external package import → recorded as an EXTERNAL_IMPORT gap
     expect(result.gaps.some((g) => g.kind === 'EXTERNAL_IMPORT')).toBe(true);
+  });
+
+  it('extracts Spring endpoint contracts from Java class and method mappings', async () => {
+    const files = [makeFile('src/OrdersController.java', `
+      @RestController
+      @RequestMapping(path = "/api")
+      class OrdersController {
+        @PostMapping(value = {"/orders", "/orders-v2"})
+        Order create() { return null; }
+
+        @RequestMapping(path = "/orders", method = {RequestMethod.GET, RequestMethod.DELETE})
+        void list() {}
+      }
+    `)];
+
+    const { result } = await extractStructuralGraphAsFacts({ repoRoot: REPO_ROOT, files });
+
+    expect(result.httpEndpoints).toEqual(expect.arrayContaining([
+      expect.objectContaining({ controller: 'OrdersController', handler: 'create', methods: ['POST'], paths: ['/api/orders', '/api/orders-v2'] }),
+      expect.objectContaining({ controller: 'OrdersController', handler: 'list', methods: ['GET', 'DELETE'], paths: ['/api/orders'] }),
+    ]));
+  });
+
+  it('records a gap instead of inventing an endpoint for a dynamic Spring path', async () => {
+    const files = [makeFile('src/OrdersController.java', `
+      @RestController
+      class OrdersController {
+        @GetMapping(PATH_PREFIX + "/orders")
+        void list() {}
+      }
+    `)];
+
+    const { result } = await extractStructuralGraphAsFacts({ repoRoot: REPO_ROOT, files });
+
+    expect(result.httpEndpoints).toHaveLength(0);
+    expect(result.gaps.some((gap) => gap.message.includes('unresolved Spring GetMapping path'))).toBe(true);
   });
 
   it('resolves a multi-segment Python import (from a.b.c import x) to a nested file', async () => {

@@ -23,12 +23,17 @@ import {
   buildIndexHubOverlay,
   mergeGraphs,
   saveGraphIndex,
+  loadGraphIndex,
   extractStructuralGraphAsFacts,
   astAvailable,
   mergeCodeFacts,
   formatAstStatsSummary,
+  extractHttpRequests,
+  matchHttpContracts,
+  httpMatchesToGraphEdges,
+  httpContractCoverage,
 } from './wiki-engine/adapters/index.js';
-import type { CodeFact, InterfaceInventory, CallChain } from './wiki-engine/adapters/index.js';
+import type { CodeFact, InterfaceInventory, CallChain, StructuralGraphResult } from './wiki-engine/adapters/index.js';
 import type { CodeCollectedFile } from './wiki-engine/code-knowledge/code-collector.js';
 import { CODE_COLLECTION_VERSION } from './wiki-engine/code-knowledge/code-collector.js';
 import type { ExtractorContext } from './wiki-engine/code-knowledge/extractors/index.js';
@@ -50,6 +55,7 @@ import type { GraphIndex } from './wiki-engine/core/graph-index.schema.js';
 import { routerTemplate, indexTemplate, HOT_TEMPLATE } from './wiki-engine/adapters/templates.js';
 import type { DomainGroup, IndexStats } from './wiki-engine/adapters/templates.js';
 import { isOverrideInvalid } from './tool-launch/call.js';
+import { resolveSpringHttpEndpoints } from './wiki-engine/code-knowledge/http-service-resolver.js';
 
 export interface ExtractCodebaseOptions {
   path?: string;
@@ -776,7 +782,8 @@ export async function extractCodebase(opts: ExtractCodebaseOptions): Promise<boo
         maxFiles,
         sourceRepo.sourceSubdir,
       );
-      if (changes.added.length === 0 && changes.changed.length === 0 && changes.deleted.length === 0) {
+      const priorGraph = await loadGraphIndex(wikiRoot);
+      if (priorGraph && changes.added.length === 0 && changes.changed.length === 0 && changes.deleted.length === 0) {
         if (opts.json) {
           console.log(JSON.stringify({ status: 'up-to-date', project }));
         } else {
@@ -796,6 +803,15 @@ export async function extractCodebase(opts: ExtractCodebaseOptions): Promise<boo
     }
   } else if (opts.incremental && !opts.json) {
     console.log(chalk.dim('[extract] no matching source baseline, running full extraction'));
+  }
+
+  // Request catalogs, import aliases and Spring configuration affect files
+  // outside the changed set. Rebuild from source whenever the baseline changes
+  // so unchanged callers and endpoints cannot retain stale contracts.
+  if (opts.incremental && (changedFiles !== undefined)) {
+    changedFiles = undefined;
+    deletedFiles = [];
+    if (!opts.json) console.log(chalk.dim('[extract] rebuilding dependent contracts from the full source snapshot'));
   }
 
   // 增量模式下，import 在提取时物化为具体文件（通配 → 各成员、具名 → 声明
@@ -918,15 +934,17 @@ export async function extractCodebase(opts: ExtractCodebaseOptions): Promise<boo
   // on merge. Falls back to heuristic-only when the WASM runtime is unavailable
   // (e.g. TEAMAI_SKIP_AST=1) or throws, recording an AST_UNAVAILABLE gap.
   const astGaps: KnowledgeGap[] = [];
+  let astResult: StructuralGraphResult | undefined;
   if (files.length > 0 && astAvailable()) {
     try {
-      const { facts: astFacts, result: astResult } = await extractStructuralGraphAsFacts({
+      const { facts: astFacts, result } = await extractStructuralGraphAsFacts({
         repoRoot: root,
         files,
       });
+      astResult = result;
       facts = mergeCodeFacts(astFacts, facts);
       let gapSeq = 0;
-      for (const gap of astResult.gaps) {
+      for (const gap of result.gaps) {
         astGaps.push({
           id: `AST-${gap.kind}-${gapSeq++}`,
           kind: gap.kind,
@@ -935,7 +953,7 @@ export async function extractCodebase(opts: ExtractCodebaseOptions): Promise<boo
         });
       }
       if (!opts.json) {
-        console.log(chalk.dim(`  [AST: ${formatAstStatsSummary(astResult.stats)}]`));
+        console.log(chalk.dim(`  [AST: ${formatAstStatsSummary(result.stats)}]`));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -955,7 +973,20 @@ export async function extractCodebase(opts: ExtractCodebaseOptions): Promise<boo
     });
   }
 
-  const graph: GraphIndex = buildCodeGraph(facts);
+  const graph: GraphIndex = buildCodeGraph(facts, { origin: project, files: files.map((file) => file.relativePath) });
+  const httpRequests = astAvailable() ? await extractHttpRequests(files, project, root) : [];
+  const httpEndpoints = resolveSpringHttpEndpoints(astResult?.httpEndpoints ?? [], files, project);
+  const httpMatches = matchHttpContracts(httpRequests, httpEndpoints);
+  graph.httpContracts = {
+    requests: httpRequests,
+    endpoints: httpEndpoints,
+    coverage: httpContractCoverage(files.length, astResult?.stats.filesParsed ?? 0, httpRequests, httpEndpoints, httpMatches, astResult?.stats.filesFailed ?? files.length, astResult?.stats.filesUnsupported ?? 0),
+    matches: httpMatches,
+  };
+  graph.httpContracts.coverageByOrigin = { [project]: graph.httpContracts.coverage! };
+  // Local contracts are useful for a monorepo too. Cross-repo matching happens
+  // during global aggregation after all per-repo contracts are available.
+  graph.edges.push(...httpMatchesToGraphEdges(httpMatches));
 
   // Call chain tracing (entry → orchestration → service → data)
   let callChains: CallChain[];

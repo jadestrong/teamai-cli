@@ -510,7 +510,7 @@ describe('a direct extractCodebase call stamps origin on the graph it writes (#9
     const staleRepoGraphDir = path.join(root, 'teamwiki', 'evidence', 'code', 'widget', '.indices');
     fs.mkdirSync(staleRepoGraphDir, { recursive: true });
     fs.writeFileSync(path.join(staleRepoGraphDir, 'graph-index.json'), JSON.stringify({
-      schemaVersion: 1, generatedAt: '2025-01-01',
+      schemaVersion: 'team-wiki.graph-index.v2', generatedAt: '2025-01-01',
       nodes: [{ slug: 'old/stale-component', title: 'StaleComponent', type: 'component', confidence: 'high' }],
       edges: [],
     }));

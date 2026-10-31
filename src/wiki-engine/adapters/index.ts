@@ -10,13 +10,16 @@ export { extractCodeFacts } from '../code-knowledge/code-extractors.js';
 export type { CodeFact, CodeFactKind, CodeEvidenceType } from '../code-knowledge/code-extractors.js';
 
 export { buildCodeGraph } from '../code-knowledge/code-graph.js';
+export { codeFileId, normalizeRelativeCodePath } from '../code-knowledge/code-identity.js';
+export { extractHttpRequests, matchHttpContracts, normalizeHttpPath, astEndpointsToHttpContracts, httpMatchesToGraphEdges, httpContractCoverage } from '../code-knowledge/http-contract.js';
+export type { HttpRequestContract, HttpEndpointContract, HttpContractMatch } from '../code-knowledge/http-contract.js';
 export {
   extractStructuralGraphAsFacts,
   astAvailable,
   mergeCodeFacts,
   formatAstStatsSummary,
 } from '../code-knowledge/ast/index.js';
-export type { StructuralGraphResult, AstExtractionGap } from '../code-knowledge/ast/index.js';
+export type { StructuralGraphResult, AstExtractionGap, AstHttpEndpoint } from '../code-knowledge/ast/index.js';
 
 export { detectCodeIncrementalChanges } from '../code-knowledge/code-incremental.js';
 
@@ -25,11 +28,12 @@ export {
   loadGraphIndex,
   saveGraphIndex,
   createGraphIndex,
+  parseGraphIndex,
   findNeighbors,
   findNeighborsNHop,
   GRAPH_INDEX_SCHEMA_VERSION,
 } from '../core/graph-index.schema.js';
-export type { GraphIndex, GraphNode, GraphEdge, RelationType } from '../core/graph-index.schema.js';
+export type { GraphIndex, GraphNode, GraphEdge, RelationType, GraphHttpContracts, HttpContractCoverage } from '../core/graph-index.schema.js';
 
 export { scanInterfaces } from '../interface-scanner.js';
 export type { InterfaceInventory, InterfaceInventoryEntry, InterfaceType } from '../interface-scanner.js';

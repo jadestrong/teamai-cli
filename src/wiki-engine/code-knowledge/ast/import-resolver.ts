@@ -24,6 +24,11 @@ export interface ResolvedImport {
 
 const tsconfigCache = new Map<string, TsconfigPathsConfig | null>();
 
+/** Configuration belongs to one source snapshot, not the lifetime of the CLI. */
+export function resetImportResolverCache(): void {
+  tsconfigCache.clear();
+}
+
 /** Find nearest tsconfig.json upward from a file directory. */
 export async function loadTsconfigPaths(
   repoRoot: string,
@@ -183,7 +188,14 @@ async function resolvePathsMapping(
   const entries = Object.entries(config.paths).sort((a, b) => b[0].length - a[0].length);
 
   for (const [pattern, targets] of entries) {
-    if (pattern.endsWith("/*")) {
+    if (pattern === "*") {
+      for (const targetBase of targets) {
+        const rel = toPosix(path.relative(root, path.join(targetBase, specifier)));
+        const candidates = await expandModulePaths(rel, fromFile, fileExists);
+        const picked = pickCandidate(candidates);
+        if (picked) return picked;
+      }
+    } else if (pattern.endsWith("/*")) {
       const prefix = pattern.slice(0, -2);
       if (!specifier.startsWith(`${prefix}/`)) continue;
       const rest = specifier.slice(prefix.length + 1);

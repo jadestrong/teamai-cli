@@ -335,7 +335,7 @@ describe('queryCodeKnowledge — progressive depth retrieval', () => {
     await fs.ensureDir(indicesDir);
 
     const graphIndex = {
-      schemaVersion: 'team-wiki.graph-index.v1',
+      schemaVersion: 'team-wiki.graph-index.v2',
       generatedAt: new Date().toISOString(),
       nodes: [
         {
