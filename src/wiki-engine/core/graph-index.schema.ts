@@ -135,6 +135,7 @@ export interface GraphHttpContracts {
   coverage?: HttpContractCoverage;
   matches?: HttpContractMatchRecord[];
   coverageByOrigin?: Record<string, HttpContractCoverage>;
+  routingHash?: string;
 }
 
 export interface HttpContractMatchRecord {
@@ -142,6 +143,7 @@ export interface HttpContractMatchRecord {
   endpoint?: HttpEndpointContractRecord;
   confidence: "EXTRACTED" | "AMBIGUOUS";
   reason?: string;
+  resolution?: { path: string; service: string; backendOrigin: string; evidence: WikiEvidence[] };
 }
 
 export interface HttpRequestContractRecord {
@@ -150,6 +152,7 @@ export interface HttpRequestContractRecord {
   line: number;
   method: string;
   path: string;
+  clientDefinition?: string;
   service?: string;
   unresolvedReason?: string;
   evidence?: WikiEvidence[];
@@ -256,14 +259,16 @@ const GraphIndexSchema = z.object({
   nodes: z.array(GraphNodeSchema),
   edges: z.array(GraphEdgeSchema),
   httpContracts: z.object({
-    requests: z.array(z.object({ origin: z.string(), file: z.string(), line: z.number(), method: z.string(), path: z.string(), service: z.string().optional(), unresolvedReason: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() })),
+    requests: z.array(z.object({ origin: z.string(), file: z.string(), line: z.number(), method: z.string(), path: z.string(), clientDefinition: z.string().optional(), service: z.string().optional(), unresolvedReason: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() })),
     endpoints: z.array(z.object({ origin: z.string(), file: z.string(), line: z.number(), methods: z.array(z.string()).optional(), path: z.string(), service: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() })),
     coverage: z.object({ filesScanned: z.number(), filesParsed: z.number(), filesFailed: z.number(), filesUnsupported: z.number().optional(), requests: z.number(), endpoints: z.number(), uniqueMatches: z.number(), candidates: z.number(), unresolved: z.number() }).optional(),
     matches: z.array(z.object({
-      request: z.object({ origin: z.string(), file: z.string(), line: z.number(), method: z.string(), path: z.string(), service: z.string().optional(), unresolvedReason: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() }),
+      request: z.object({ origin: z.string(), file: z.string(), line: z.number(), method: z.string(), path: z.string(), clientDefinition: z.string().optional(), service: z.string().optional(), unresolvedReason: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() }),
       endpoint: z.object({ origin: z.string(), file: z.string(), line: z.number(), methods: z.array(z.string()).optional(), path: z.string(), service: z.string().optional(), evidence: z.array(WikiEvidenceSchema).optional() }).optional(),
       confidence: z.enum(["EXTRACTED", "AMBIGUOUS"]), reason: z.string().optional(),
+      resolution: z.object({ path: z.string(), service: z.string(), backendOrigin: z.string(), evidence: z.array(WikiEvidenceSchema) }).optional(),
     })).optional(),
+    routingHash: z.string().optional(),
     coverageByOrigin: z.record(z.string(), z.object({ filesScanned: z.number(), filesParsed: z.number(), filesFailed: z.number(), filesUnsupported: z.number().optional(), requests: z.number(), endpoints: z.number(), uniqueMatches: z.number(), candidates: z.number(), unresolved: z.number() })).optional(),
   }).optional(),
 }).passthrough();
@@ -651,7 +656,8 @@ function mergeHttpContracts(
       const method = "method" in item
         ? (item as HttpRequestContractRecord).method
         : (item as HttpEndpointContractRecord).methods;
-      const key = JSON.stringify([item.origin, item.file, item.line, method, item.path, item.service]);
+      const clientDefinition = "method" in item ? (item as HttpRequestContractRecord).clientDefinition : undefined;
+      const key = JSON.stringify([item.origin, item.file, item.line, method, item.path, item.service, clientDefinition]);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -662,6 +668,7 @@ function mergeHttpContracts(
     endpoints: unique([...(base?.endpoints ?? []), ...(overlay?.endpoints ?? [])]),
     coverage: overlay?.coverage ?? base?.coverage,
     matches: overlay?.matches ?? base?.matches,
+    routingHash: overlay?.routingHash ?? base?.routingHash,
     coverageByOrigin: { ...base?.coverageByOrigin, ...overlay?.coverageByOrigin },
   };
 }

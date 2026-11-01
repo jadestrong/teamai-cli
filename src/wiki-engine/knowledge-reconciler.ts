@@ -1,5 +1,6 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import {
   loadGraphIndex,
   saveGraphIndex,
@@ -102,7 +103,7 @@ async function graphUnchanged(wikiRoot: string, graph: GraphIndex): Promise<bool
   if (raw === null) return false;
   const saved: unknown = JSON.parse(raw);
   if (typeof saved !== 'object' || saved === null || !('generatedAt' in saved) || typeof saved.generatedAt !== 'string') return false;
-  return JSON.stringify({ ...graph, generatedAt: saved.generatedAt }, null, 2) === raw;
+  return isDeepStrictEqual(JSON.parse(JSON.stringify({ ...graph, generatedAt: saved.generatedAt })), saved);
 }
 
 async function loadReconciliationBase(wikiRoot: string): Promise<GraphIndex> {

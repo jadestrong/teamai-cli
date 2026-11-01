@@ -7,7 +7,8 @@ import { pathExists } from './utils/fs.js';
 import { GRAPH_INDEX_SCHEMA_VERSION, parseGraphIndex, type GraphIndex } from './wiki-engine/adapters/index.js';
 import { validateGraph, graphEdgeKey } from './wiki-engine/core/graph-index.schema.js';
 import { codeFileId } from './wiki-engine/code-knowledge/code-identity.js';
-import { matchHttpContracts, httpMatchesToGraphEdges, httpContractCoverage } from './wiki-engine/code-knowledge/http-contract.js';
+import { httpMatchesToGraphEdges, httpContractCoverage } from './wiki-engine/code-knowledge/http-contract.js';
+import { loadHttpRouting, matchRoutedHttpContracts } from './http-routing.js';
 
 export type WikiLintSeverity = 'high' | 'medium' | 'low' | 'info';
 
@@ -207,7 +208,10 @@ export async function lintTeamwiki(opts: {
       });
     }
     const contracts = graph.httpContracts;
-    const matches = contracts ? matchHttpContracts(contracts.requests, contracts.endpoints) : [];
+    let routing: Awaited<ReturnType<typeof loadHttpRouting>>;
+    try { routing = await loadHttpRouting(wikiRoot); }
+    catch (error) { addIssue({ severity: 'high', category: 'http-routing-invalid', location: 'teamwiki/http-routing.yaml', message: String(error) }); }
+    const matches = contracts ? matchRoutedHttpContracts(contracts.requests, contracts.endpoints, routing) : [];
     const formal = httpMatchesToGraphEdges(matches);
     const expected = new Set(formal.map(graphEdgeKey));
     const actual = new Set(graph.edges.filter((edge) => edge.relation === 'CALLS_HTTP').map(graphEdgeKey));
@@ -215,6 +219,7 @@ export async function lintTeamwiki(opts: {
       addIssue({ severity: 'high', category: 'http-contract-mismatch', location, message: 'CALLS_HTTP edges do not match the unique method/path/service contracts' });
     }
     if (contracts) {
+      if (contracts.routingHash !== routing?.hash) addIssue({ severity: 'high', category: 'http-routing-stale', location, message: 'HTTP routing configuration changed; run `teamai codebase --reconcile` or an incremental import' });
       const nodeIds = new Set(graph.nodes.map((node) => node.slug));
       const observations = [...contracts.requests, ...contracts.endpoints];
       const missing = observations.filter((record) => {

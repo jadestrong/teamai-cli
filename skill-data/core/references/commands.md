@@ -490,7 +490,8 @@ Generated: do not edit by hand. Regenerate with
   - `--project <name>` (hidden) — Codebase slug under teamwiki/evidence/code/, required for --deep-enrich
   - `--upgrade-wiki` (hidden) — Migrate docs/team-codebase/ to teamwiki/ graph format
   - `--lint` — Run global consistency lint over the teamwiki knowledge graph
-  - `--reconcile` — Reconcile product and code knowledge in teamwiki
+  - `--init-http-routing` — Create or update teamwiki/http-routing.yaml from imported clients, requests and backend services; preserve user routes
+  - `--reconcile` — Apply HTTP routing configuration and reconcile product and code knowledge in teamwiki without rescanning source
   - `--deep-enrich` — Generate deep knowledge docs from extracted evidence
   - `--fix` (hidden) — Deprecated: teamwiki lint has no autofix; runs lint in report-only mode
   - `--status` — Show knowledge-base git baseline (headSha / repoUrl / branch)

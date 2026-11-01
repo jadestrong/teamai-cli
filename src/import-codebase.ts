@@ -618,6 +618,8 @@ export async function refreshTeamwikiIndexes(wikiRoot: string): Promise<void> {
     const { aggregateGlobalGraph } = await import('./graph-aggregate.js');
     await aggregateGlobalGraph(wikiRoot);
   } catch (e) {
+        const { HttpRoutingError } = await import('./http-routing.js');
+        if (e instanceof HttpRoutingError) throw e;
     log.warn(`[graph] global aggregation failed (non-blocking): ${(e as Error).message}`);
   }
   try {
@@ -655,6 +657,14 @@ export async function importLocalCheckout(
 ): Promise<{ updated: false } | { updated: true; deepEnrichComplete: boolean }> {
   const updated = await importCodebase(opts);
   if (!updated) {
+    const { refreshHttpRouting } = await import('./http-routing.js');
+    const routing = await refreshHttpRouting(opts.wikiRoot);
+    if (routing.updated) {
+      const { rebuildWikiIndex } = await import('./rebuild-wiki-index.js');
+      await rebuildWikiIndex(opts.wikiRoot);
+      log.info(`${opts.slug}: source unchanged; HTTP routing refreshed (${routing.uniqueMatches} unique matches)`);
+      return { updated: true, deepEnrichComplete: true };
+    }
     log.info(`${opts.slug}: no source changes since the last import, teamwiki unchanged`);
     return { updated: false };
   }

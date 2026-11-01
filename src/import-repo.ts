@@ -368,6 +368,18 @@ export async function importFromRepo(opts: ImportFromRepoOptions): Promise<boole
         try {
             await touchCacheEntry({ provider: providerName, owner, repo: repoName, lastSyncedSha: cloneSha });
         } catch {}
+        if (!skipAutoPush) {
+            const release = await lockTeamwiki(target);
+            try {
+                const { refreshHttpRouting } = await import('./http-routing.js');
+                const routing = await refreshHttpRouting(teamwikiRoot);
+                if (routing.updated) {
+                    const { rebuildWikiIndex } = await import('./rebuild-wiki-index.js');
+                    await rebuildWikiIndex(teamwikiRoot);
+                    if (team) await publishTeamwikiViaMR(team, `[teamai] Refresh HTTP routing for ${owner}/${repoName}`);
+                }
+            } finally { await release(); }
+        }
         log.info(chalk.green(`✓ repo ${owner}/${repoName} unchanged, skipped`));
         return true;
     }
@@ -444,6 +456,14 @@ export async function importFromRepo(opts: ImportFromRepoOptions): Promise<boole
         if (!skipAutoPush) {
             await refreshTeamwikiIndexes(teamwikiRoot);
             if (team) await publishTeamwikiViaMR(team, `[teamai] Import codebase knowledge from ${owner}/${repoName}`);
+        }
+    } else if (!skipAutoPush) {
+        const { refreshHttpRouting } = await import('./http-routing.js');
+        const routing = await refreshHttpRouting(teamwikiRoot);
+        if (routing.updated) {
+            const { rebuildWikiIndex } = await import('./rebuild-wiki-index.js');
+            await rebuildWikiIndex(teamwikiRoot);
+            if (team) await publishTeamwikiViaMR(team, `[teamai] Refresh HTTP routing for ${owner}/${repoName}`);
         }
     }
 

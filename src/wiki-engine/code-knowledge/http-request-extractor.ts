@@ -25,6 +25,7 @@ interface Value {
   reason?: string;
   registry?: boolean;
   baseURL?: string;
+  clientDefinition?: string;
 }
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
@@ -193,11 +194,11 @@ export async function extractRequestContracts(
           const hostNode = target.values.get("HOST");
           const hosts = hostNode?.type === "array" ? children(hostNode).map(literal) : [];
           const staticHost = host.text ?? (hosts.length > 0 && hosts.every((candidate) => candidate !== undefined && candidate === hosts[0]) ? hosts[0] : undefined);
-          return { module: target, node: target.values.get("API"), evidence: [evidence(target, hostNode ?? target.tree.rootNode, origin)], baseURL: staticHost, reason: staticHost ? undefined : "Dynamic API host" };
+          return { module: target, node: target.values.get("API"), evidence: [evidence(target, hostNode ?? target.tree.rootNode, origin)], baseURL: staticHost, clientDefinition: target.file.relativePath, reason: staticHost ? undefined : "Dynamic API host" };
         }
         const value = base.node?.type === "program" ? base.module.values.get(key) : property(base.node, key);
         const resolved = evaluate(value, base.module, depth + 1);
-        return { ...resolved, baseURL: base.baseURL ?? resolved.baseURL, reason: base.reason ?? resolved.reason, evidence: [...base.evidence, ...resolved.evidence] };
+        return { ...resolved, baseURL: base.baseURL ?? resolved.baseURL, clientDefinition: base.clientDefinition ?? resolved.clientDefinition, reason: base.reason ?? resolved.reason, evidence: [...base.evidence, ...resolved.evidence] };
       }
       if (node.type === "object" || node.type === "program") return result;
       if (node.type === "call_expression") {
@@ -239,7 +240,7 @@ export async function extractRequestContracts(
       const value = module.values.get(name);
       if (value?.type === "call_expression" && field(value, "function")?.text.endsWith(".create")) {
         const config = children(field(value, "arguments")!)[0];
-        return evaluate(property(config, "baseURL"), module);
+        return { ...evaluate(property(config, "baseURL"), module), clientDefinition: module.file.relativePath };
       }
       return undefined;
     };
@@ -314,6 +315,9 @@ export async function extractRequestContracts(
       requests.push({
         origin, file: module.file.relativePath, line: node.startPosition.row + 1,
         method: method ?? "", path: requestPath, ...(service ? { service } : {}),
+        clientDefinition: value.clientDefinition ?? base?.clientDefinition
+          ?? (receiver?.type === 'identifier' ? module.imports.get(receiver.text)?.module?.file.relativePath : undefined)
+          ?? module.file.relativePath,
         ...(reason ? { unresolvedReason: reason } : {}),
         evidence: [{ ...evidence(module, node, origin), type: "usage" }, ...value.evidence],
       });

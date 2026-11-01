@@ -11,6 +11,8 @@ export interface HttpRequestContract {
   line: number;
   method: string;
   path: string;
+  /** Source of the API catalog or client; inline requests use their caller file. */
+  clientDefinition?: string;
   service?: string;
   unresolvedReason?: string;
   evidence?: WikiEvidence[];
@@ -31,6 +33,12 @@ export interface HttpContractMatch {
   endpoint?: HttpEndpointContract;
   confidence: "EXTRACTED" | "AMBIGUOUS";
   reason?: string;
+  resolution?: {
+    path: string;
+    service: string;
+    backendOrigin: string;
+    evidence: WikiEvidence[];
+  };
 }
 
 export function astEndpointsToHttpContracts(
@@ -60,9 +68,10 @@ export function httpMatchesToGraphEdges(matches: HttpContractMatch[]): GraphEdge
       origin: match.request.origin,
       weight: 1,
       evidence: [
-        { ref: codeFileId(match.request.origin, match.request.file), lineStart: match.request.line, lineEnd: match.request.line, note: `${match.request.method} ${match.request.path} -> ${match.request.service}` },
+        { ref: codeFileId(match.request.origin, match.request.file), lineStart: match.request.line, lineEnd: match.request.line, note: `${match.request.method} ${match.request.path} -> ${match.resolution?.service ?? match.request.service}` },
         { ref: codeFileId(match.endpoint.origin, match.endpoint.file), lineStart: match.endpoint.line, lineEnd: match.endpoint.line, note: `${match.request.method} ${match.endpoint.path} <- ${match.endpoint.service}` },
         ...(match.request.evidence ?? []), ...(match.endpoint.evidence ?? []),
+        ...(match.resolution?.evidence ?? []),
       ],
     }];
   });
@@ -104,6 +113,11 @@ export function normalizeHttpPath(value: string): string {
   return path.length > 1 ? path.replace(/\/$/u, "") : path;
 }
 
+/** Unconstrained path parameter names do not change a route's URL shape. */
+function httpPathShape(value: string): string {
+  return normalizeHttpPath(value).replace(/\{[\w$]+\}/gu, "{}");
+}
+
 /** A formal dependency exists only for a unique method/path/resolved-service endpoint. */
 export function matchHttpContracts(requests: HttpRequestContract[], endpoints: HttpEndpointContract[]): HttpContractMatch[] {
   return requests.map((request) => {
@@ -112,7 +126,7 @@ export function matchHttpContracts(requests: HttpRequestContract[], endpoints: H
     }
     const candidates = endpoints.filter((endpoint) =>
       endpoint.service === request.service
-      && normalizeHttpPath(endpoint.path) === normalizeHttpPath(request.path)
+      && httpPathShape(endpoint.path) === httpPathShape(request.path)
       && (endpoint.methods === undefined || endpoint.methods.includes(request.method)));
     if (candidates.length === 1) return { request, endpoint: candidates[0], confidence: "EXTRACTED" };
     return { request, confidence: "AMBIGUOUS", reason: candidates.length === 0 ? "No matching endpoint" : "Multiple matching endpoints" };

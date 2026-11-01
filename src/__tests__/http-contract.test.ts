@@ -27,4 +27,34 @@ describe("HTTP contract extraction", () => {
     expect(matchHttpContracts(requests, [{ origin: "api", file: "A.java", line: 1, methods: ["GET"], path: "/api/orders", service: "api" }])[0])
       .toMatchObject({ confidence: "AMBIGUOUS", reason: "Unresolved service" });
   });
+
+  it("matches AMS id templates to Spring planId templates without changing evidence", () => {
+    const request = { origin: "web", file: "request.ts", line: 32, method: "GET", path: "/deposit_applications/plans/{id}/histories", service: "funding-site" };
+    const endpoint = { origin: "funding", file: "DepositApplicationCtrl.java", line: 653, methods: ["GET"], path: "/deposit_applications/plans/{planId}/histories", service: "funding-site" };
+    const matches = matchHttpContracts([request], [endpoint]);
+    expect(matches[0]).toEqual({ request, endpoint, confidence: "EXTRACTED" });
+    const edge = httpMatchesToGraphEdges(matches)[0];
+    expect(edge.evidence?.[0].note).toContain(request.path);
+    expect(edge.evidence?.[1].note).toContain(endpoint.path);
+  });
+
+  it("keeps equivalent named templates ambiguous when more than one endpoint exists", () => {
+    const request = { origin: "web", file: "request.ts", line: 1, method: "GET", path: "/plans/{id}", service: "funding-site" };
+    expect(matchHttpContracts([request], [
+      { origin: "funding", file: "A.java", line: 1, methods: ["GET"], path: "/plans/{planId}", service: "funding-site" },
+      { origin: "funding", file: "B.java", line: 1, methods: ["GET"], path: "/plans/{otherId}", service: "funding-site" },
+    ])[0]).toMatchObject({ confidence: "AMBIGUOUS", reason: "Multiple matching endpoints" });
+  });
+
+  it.each([
+    { path: "/plans/{planId}/histories", methods: ["POST"], service: "funding-site" },
+    { path: "/plans/{planId}/histories", methods: ["GET"], service: "funding-bos" },
+    { path: "/plans/{planId}/details", methods: ["GET"], service: "funding-site" },
+    { path: "/plans/{planId:[0-9]+}/histories", methods: ["GET"], service: "funding-site" },
+    { path: "/plans/{planId}/{extra}/histories", methods: ["GET"], service: "funding-site" },
+  ])("does not infer a template match across different route constraints: $path $methods $service", (endpoint) => {
+    const request = { origin: "web", file: "request.ts", line: 1, method: "GET", path: "/plans/{id}/histories", service: "funding-site" };
+    expect(matchHttpContracts([request], [{ origin: "funding", file: "A.java", line: 1, ...endpoint }])[0])
+      .toMatchObject({ confidence: "AMBIGUOUS", reason: "No matching endpoint" });
+  });
 });

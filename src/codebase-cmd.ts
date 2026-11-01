@@ -22,6 +22,7 @@ export interface CodebaseCmdOptions extends GlobalOptions {
     status?: boolean;
     reconcile?: boolean;
     deepEnrich?: boolean;
+    initHttpRouting?: boolean;
 }
 
 // ─── Command handler ─────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ export async function codebaseCmd(opts: CodebaseCmdOptions): Promise<void> {
         return;
     }
 
-    if (!opts.lint && !opts.reconcile && !opts.deepEnrich) {
+    if (!opts.lint && !opts.reconcile && !opts.deepEnrich && !opts.initHttpRouting) {
         console.log('teamai codebase — team codebase knowledge management');
         console.log('');
         console.log('Usage:');
@@ -74,6 +75,7 @@ export async function codebaseCmd(opts: CodebaseCmdOptions): Promise<void> {
         console.log('  teamai codebase --lint --json           Output JSON report (for CI)');
         console.log('  teamai codebase --lint --severity high  Only report high-severity issues');
         console.log('  teamai codebase --reconcile             Reconcile product and code knowledge');
+        console.log('  teamai codebase --init-http-routing     Generate or refresh HTTP routing configuration');
         console.log('  teamai codebase --deep-enrich           Generate deep knowledge from extracted evidence');
         console.log('  teamai codebase --status                Show knowledge-base git baseline');
         console.log('');
@@ -85,7 +87,7 @@ export async function codebaseCmd(opts: CodebaseCmdOptions): Promise<void> {
     const { pathExists } = await import('./utils/fs.js');
     let target: TeamwikiTarget | undefined;
     try {
-        target = await teamwikiTargetFor(opts, !opts.reconcile && !opts.deepEnrich);
+        target = await teamwikiTargetFor(opts, !opts.reconcile && !opts.deepEnrich && !opts.initHttpRouting);
     } catch (error) {
         if (!(error instanceof DetachedTeamRepoError)) throw error;
         log.error(error.message);
@@ -95,10 +97,26 @@ export async function codebaseCmd(opts: CodebaseCmdOptions): Promise<void> {
 
     if (!target || !(await pathExists(target.wikiRoot))) {
         console.log('No teamwiki found. Run `teamai import` first.');
-        if (opts.reconcile || opts.deepEnrich) process.exitCode = 1;
+        if (opts.reconcile || opts.deepEnrich || opts.initHttpRouting) process.exitCode = 1;
         return;
     }
     const teamwikiDir = target.wikiRoot;
+
+    if (opts.initHttpRouting) {
+        const { initHttpRouting } = await import('./http-routing.js');
+        const { lockTeamwiki } = await import('./utils/teamwiki-root.js');
+        const releaseLock = target.team && !opts.dryRun ? await lockTeamwiki(target) : async () => {};
+        try {
+            const result = await initHttpRouting(teamwikiDir, opts.dryRun);
+            if (opts.json) console.log(JSON.stringify({ ...result, dryRun: !!opts.dryRun }, null, 2));
+            else console.log(`HTTP routing template: ${result.file} (${result.clients} clients, ${result.requests} requests, ${result.backends} backend services${opts.dryRun ? '; preview only' : ''}). Fill routes, then run \`teamai codebase --reconcile\`.`);
+            if (target.team && !opts.dryRun && result.updated) {
+                const { autoPushTeamRepo } = await import('./utils/git.js');
+                await autoPushTeamRepo(target.team.localConfig.repo.localPath, '[teamai] Refresh HTTP routing template', [path.relative(target.team.localConfig.repo.localPath, result.file)]);
+            }
+        } finally { await releaseLock(); }
+        return;
+    }
 
     if (opts.deepEnrich) {
         const project = opts.project?.trim() ?? '';
@@ -203,18 +221,20 @@ export async function codebaseCmd(opts: CodebaseCmdOptions): Promise<void> {
         const { lockTeamwiki } = await import('./utils/teamwiki-root.js');
         const releaseLock = team ? await lockTeamwiki(target) : async () => {};
         try {
+            const { refreshHttpRouting } = await import('./http-routing.js');
+            const httpRouting = await refreshHttpRouting(teamwikiDir, opts.dryRun);
             const result = await reconcileKnowledge({ wikiRoot: teamwikiDir, dryRun: opts.dryRun });
             if (opts.json) {
-                console.log(JSON.stringify(result, null, 2));
+                console.log(JSON.stringify({ ...result, httpRouting }, null, 2));
             } else {
-                console.log(`Reconciliation complete: mappings=${result.mappings}, gaps=${result.gaps.length}, conflicts=${result.conflicts.length}`);
+                console.log(`Reconciliation complete: mappings=${result.mappings}, gaps=${result.gaps.length}, conflicts=${result.conflicts.length}${httpRouting.uniqueMatches || httpRouting.updated ? `, HTTP matches=${httpRouting.uniqueMatches}` : ''}`);
             }
             if (team) {
                 const { autoPushTeamRepo } = await import('./utils/git.js');
                 const pushed = await autoPushTeamRepo(
                     team.localConfig.repo.localPath,
                     '[teamai] Reconcile product and code knowledge',
-                    [path.relative(team.localConfig.repo.localPath, path.join(teamwikiDir, '.indices', 'graph-index.json'))],
+                    ['.indices/graph-index.json', 'http-links.md'].map((file) => path.relative(team.localConfig.repo.localPath, path.join(teamwikiDir, file))),
                 );
                 if (pushed && !opts.json) log.success(`Pushed to team knowledge repo (${team.localConfig.repo.remote})`);
             }

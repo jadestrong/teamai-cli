@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { parse } from 'yaml';
 
 // node scripts/verify-http-graph.mjs <output-root> <origin=source-root> ...
 const [outputRoot, ...repositories] = process.argv.slice(2);
@@ -13,6 +14,10 @@ const roots = new Map(repositories.map((entry) => {
 const errors = [];
 let anchorsChecked = 0;
 const sourceCache = new Map();
+const routing = await fs.readFile(path.join(outputRoot, 'teamwiki/http-routing.yaml'), 'utf8').then(parse).catch((error) => {
+  if (error.code === 'ENOENT') return undefined;
+  throw error;
+});
 function check(condition, message) { if (!condition) errors.push(message); }
 function identity(origin, file) { return `code://${origin}/${file}`; }
 async function source(origin, file) {
@@ -41,9 +46,26 @@ function normalize(value) {
   const normalized = `/${value.split(/[?#]/u)[0]}`.replace(/\/+/gu, '/').replace(/:([\w]+)/gu, '{$1}');
   return normalized.length > 1 ? normalized.replace(/\/$/u, '') : normalized;
 }
-function uniqueEndpoint(request, endpoints) {
+function routedRequest(request, name) {
+  if (name !== 'aggregate' || !routing || !request.path || !request.method || (request.unresolvedReason && !['Dynamic API host', 'Dynamic baseURL'].includes(request.unresolvedReason))) return request;
+  const rules = routing.frontends.filter((f) => f.origin === request.origin).flatMap((f) => f.clients)
+    .filter((c) => c.definition === (request.clientDefinition ?? request.file)).flatMap((c) => c.routes)
+    .filter((r) => r.path !== null && r.rewrite !== null && r.backend !== null)
+    .filter((r) => new RegExp(`^(?:${r.path})$`, 'u').test(request.path));
+  if (!rules.length) return request;
+  const max = Math.max(...rules.map((r) => r.priority ?? 0));
+  const selected = rules.filter((r) => (r.priority ?? 0) === max);
+  if (selected.length !== 1) return { ...request, unresolvedReason: 'Multiple matching proxy routes' };
+  const rule = selected[0], captures = new RegExp(`^(?:${rule.path})$`, 'u').exec(request.path);
+  const target = rule.rewrite.replace(/\$(\d+)/gu, (_, slot) => captures[Number(slot)] ?? '');
+  if (!target.startsWith('/')) return { ...request, unresolvedReason: 'Invalid rewrite' };
+  return { ...request, path: normalize(target), service: rule.backend.service, backendOrigin: rule.backend.origin, unresolvedReason: undefined };
+}
+function uniqueEndpoint(request, endpoints, name) {
+  request = routedRequest(request, name);
   if (request.unresolvedReason || !request.service || !request.method || !request.path) return [];
-  return endpoints.filter((endpoint) => endpoint.service === request.service && normalize(endpoint.path) === normalize(request.path) && (!endpoint.methods || endpoint.methods.includes(request.method)));
+  const shape = (value) => normalize(value).replace(/\{[\w$]+\}/gu, '{}');
+  return endpoints.filter((endpoint) => (!request.backendOrigin || endpoint.origin === request.backendOrigin) && endpoint.service === request.service && shape(endpoint.path) === shape(request.path) && (!endpoint.methods || endpoint.methods.includes(request.method)));
 }
 function edgeKey(edge) { return JSON.stringify([edge.from, edge.to, edge.relation, edge.source]); }
 async function inspectGraph(graph, name) {
@@ -81,7 +103,7 @@ async function inspectGraph(graph, name) {
   const expectedEdges = new Set();
   let uniqueMatches = 0;
   for (const request of contracts.requests) {
-    const endpoints = uniqueEndpoint(request, contracts.endpoints);
+    const endpoints = uniqueEndpoint(request, contracts.endpoints, name);
     const matches = contracts.matches.filter((match) => JSON.stringify(match.request) === JSON.stringify(request));
     check(matches.length === 1, `${name}: request has missing or duplicated match metadata`);
     if (endpoints.length === 1) {
@@ -94,6 +116,11 @@ async function inspectGraph(graph, name) {
       check(!!edge, `${name}: unique match lacks a formal edge`);
       for (const record of [request, endpoint]) check(edge?.evidence?.some((item) => item.ref === identity(record.origin, record.file) && item.lineStart === record.line), `${name}: HTTP edge lost a call/definition anchor`);
       for (const item of [...request.evidence ?? [], ...endpoint.evidence ?? []]) check(edge?.evidence?.some((proof) => JSON.stringify(proof) === JSON.stringify(item)), `${name}: HTTP edge lost configuration evidence`);
+      const resolved = routedRequest(request, name);
+      if (resolved.backendOrigin) {
+        check(matches[0]?.resolution?.path === resolved.path && matches[0]?.resolution?.backendOrigin === resolved.backendOrigin && matches[0]?.resolution?.service === resolved.service, `${name}: wrong routing resolution`);
+        check(edge?.evidence?.some((proof) => proof.ref === 'http-routing.yaml' && proof.type === 'config'), `${name}: HTTP edge lost proxy evidence`);
+      }
     } else check(matches[0]?.confidence === 'AMBIGUOUS' && !matches[0]?.endpoint, `${name}: unresolved request became formal`);
   }
   for (const edge of formalEdges) check(expectedEdges.has(edgeKey(edge)), `${name}: unexpected formal HTTP edge`);
@@ -130,7 +157,7 @@ for (const endpoint of sampleEndpoints) {
   check(lines?.[endpoint.line - 1]?.includes('@GetMapping'), `BankSwift definition anchor does not point to its mapping: ${endpoint.line}`);
 }
 const report = { generatedAt: new Date().toISOString(), passed: errors.length === 0, errors, anchorsChecked, sourceFilesChecked: sourceCache.size, summaries, repositoryState, sampleRequests, sampleEndpoints,
-  limitations: ['This verifies static CLI extraction from the real repositories. Endpoint counts describe source declarations, including conditionally registered controllers, rather than runtime availability.', 'AMS TRADE hosts depend on runtime CG/entity configuration. No static gateway rewrite proving /funding/* -> funding-site /* was found in these source repositories. Such observations remain unresolved and do not create formal cross-repository edges.'],
+  limitations: ['This verifies static CLI extraction from the real repositories. Endpoint counts describe source declarations, including conditionally registered controllers, rather than runtime availability.', routing ? 'Formal HTTP edges use explicitly configured client-scoped proxy routes. Unconfigured or unresolved URLs and methods remain observations; no deployed API requests were executed.' : 'Dynamic gateway hosts and proxy paths without explicit routing configuration remain unresolved.'],
 };
 await fs.writeFile(path.join(outputRoot, 'verification.json'), `${JSON.stringify(report, null, 2)}\n`);
 const rows = summaries.map((summary) => `| ${summary.name} | ${summary.coverage.filesScanned} | ${summary.nodes} | ${summary.edges} | ${summary.coverage.requests} | ${summary.coverage.endpoints} | ${summary.formalHttpEdges} |`).join('\n');

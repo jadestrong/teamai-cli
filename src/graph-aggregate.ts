@@ -6,6 +6,7 @@ import { log } from './utils/logger.js';
 import { caseFoldKey } from './manifest-schema.js';
 import { httpContractCoverage } from './wiki-engine/code-knowledge/http-contract.js';
 import { graphEdgeKey } from './wiki-engine/core/graph-index.schema.js';
+import { applyHttpRouting, loadHttpRouting, writeHttpLinks } from './http-routing.js';
 
 /**
  * 聚合 teamwiki/evidence/code/ 下所有仓库的 per-repo graph。
@@ -86,7 +87,7 @@ export async function buildAggregatedGraph(teamwikiRoot: string) {
         // previously unique local match may become ambiguous after importing
         // another service, so persisted local HTTP edges cannot survive here.
         const base = { ...globalGraph, edges: globalGraph.edges.filter((edge) => edge.relation !== 'CALLS_HTTP') };
-        return mergeGraphs(base, { ...base, edges: httpMatchesToGraphEdges(matches) });
+        return applyHttpRouting(mergeGraphs(base, { ...base, edges: httpMatchesToGraphEdges(matches) }), await loadHttpRouting(teamwikiRoot));
     }
     return globalGraph;
 }
@@ -414,7 +415,7 @@ export async function scopeGlobalGraph(
                 ? { request: match.request, confidence: 'AMBIGUOUS' as const, reason: 'Endpoint outside query scope' } : match);
         const coverageByOrigin = Object.fromEntries(Object.entries(contracts.coverageByOrigin ?? {}).filter(([origin]) => allowed({ origin })));
         const counts = Object.values(coverageByOrigin);
-        httpContracts = { requests, endpoints, matches, coverageByOrigin, coverage: httpContractCoverage(
+        httpContracts = { requests, endpoints, matches, coverageByOrigin, routingHash: contracts.routingHash, coverage: httpContractCoverage(
             counts.reduce((sum, count) => sum + count.filesScanned, 0),
             counts.reduce((sum, count) => sum + count.filesParsed, 0), requests, endpoints, matches ?? [],
             counts.reduce((sum, count) => sum + count.filesFailed, 0),
@@ -439,6 +440,7 @@ export async function aggregateGlobalGraph(
         const destPath = path.join(teamwikiRoot, '.indices', 'graph-index.json');
         await fs.ensureDir(path.dirname(destPath));
         await fs.writeFile(destPath, JSON.stringify(globalGraph, null, 2), 'utf8');
+        await writeHttpLinks(teamwikiRoot, globalGraph);
         log.info(`global graph-index.json aggregated (${globalGraph.nodes.length} nodes, ${globalGraph.edges.length} edges)`);
         return { nodes: globalGraph.nodes.length, edges: globalGraph.edges.length };
     }

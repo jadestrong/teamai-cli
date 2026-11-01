@@ -154,7 +154,7 @@ export async function rebuildWikiIndex(teamwikiRoot: string): Promise<void> {
   routerLines.push('## 路由规则');
   routerLines.push('');
   routerLines.push('1. **按组件名匹配** → 路由关键词列对应域');
-  routerLines.push('2. **Cross-repository HTTP dependencies** → inspect CALLS_HTTP and httpContracts in graph-index.json');
+  routerLines.push('2. **Cross-repository HTTP dependencies** → inspect http-links.md, CALLS_HTTP and httpContracts in graph-index.json; configure proxies in http-routing.yaml');
   routerLines.push('3. **接口/API 问题** → 优先匹配有 interfaces.md 的仓库');
   routerLines.push('4. **调用链/排障** → 查对应仓库的 dependency-paths.md');
   routerLines.push('5. **模块职责概述** → 查 overview.md 或 modules/*.md');
